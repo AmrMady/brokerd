@@ -1,5 +1,6 @@
-// Package marketdata reads trades and quotes from a feed and checks each
-// symbol's sequence numbers.
+// Package marketdata reads trades and quotes from a feed, checks each
+// symbol's sequence numbers, keeps the latest quote for each symbol and
+// builds bars.
 package marketdata
 
 import (

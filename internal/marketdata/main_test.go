@@ -2,6 +2,7 @@ package marketdata_test
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 
 	"go.uber.org/goleak"
@@ -41,3 +42,10 @@ type discard struct{}
 
 func (discard) HandleTrade(marketdata.Trade) {}
 func (discard) HandleQuote(marketdata.Quote) {}
+
+func wantRows(t *testing.T, what string, got, want []string) {
+	t.Helper()
+	if !slices.Equal(got, want) {
+		t.Errorf("%s:\n got %q\nwant %q", what, got, want)
+	}
+}

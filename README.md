@@ -14,12 +14,13 @@ Done:
   with fees, SEC and FINRA regulatory fees on sells, T+1 settlement of sale
   proceeds, tax lots with realized gains and losses, reversals, balances,
   account history and a reconcile command.
-- Market data feeds: a seeded random-walk simulator and CSV replay, with
-  per-symbol sequence checks, and a lock-free latest-quote cache.
+- Market data: a seeded random-walk simulator and CSV replay, per-symbol
+  sequence checks, a lock-free latest-quote cache, and 1s and 1m OHLCV bars
+  by event time.
 
 Planned:
 
-- Market data: OHLCV bars, WebSocket streaming
+- Market data: WebSocket streaming
 - Paper trading: market and limit orders filled against live quotes
 - REST API, metrics, OpenAPI spec
 - Transactional outbox to Kafka
@@ -144,6 +145,14 @@ goroutine. Each symbol's events carry a sequence number.
   reads as fast as the `sync.Map`, but copies itself for every new symbol,
   which is quadratic. Run them with
   `go test -run '^$' -bench QuoteCache -cpu 1,14 ./internal/marketdata`.
+- Bars are built from trades by event time, one aggregator per interval.
+  The watermark is the latest event time seen from any symbol, quotes
+  included, so bars of a quiet symbol still close. A window closes once the
+  watermark passes its end plus a grace period, and its bars go out sorted
+  by symbol. Trades that arrive out of order within the grace period are
+  placed by their own time (open and close follow event time, not arrival);
+  trades for a closed window are dropped and counted. A 1s aggregator
+  handles about 13M trades/s on one core.
 
 ## Running
 
