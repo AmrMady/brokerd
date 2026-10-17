@@ -15,11 +15,11 @@ Done:
   proceeds, tax lots with realized gains and losses, reversals, balances,
   account history and a reconcile command.
 - Market data feeds: a seeded random-walk simulator and CSV replay, with
-  per-symbol sequence checks.
+  per-symbol sequence checks, and a lock-free latest-quote cache.
 
 Planned:
 
-- Market data: latest quotes, OHLCV bars, WebSocket streaming
+- Market data: OHLCV bars, WebSocket streaming
 - Paper trading: market and limit orders filled against live quotes
 - REST API, metrics, OpenAPI spec
 - Transactional outbox to Kafka
@@ -124,6 +124,26 @@ goroutine. Each symbol's events carry a sequence number.
   sequence; an event that skips ahead is passed on and counted as a gap,
   and one at or behind the last is dropped and counted as stale. Late
   events aren't held back to fill a gap: for prices, the newest one wins.
+- The latest-quote cache is read far more than it's written, so reads take
+  no locks. Each symbol has an `atomic.Pointer` to an immutable quote, and
+  an update stores a pointer to a new one. The pointers live in a `sync.Map`,
+  which is written only when a symbol first appears. I benchmarked it
+  against the alternatives (1,000 symbols, Apple M4 Pro, time per read with
+  reads spread over all cores, so lower is better):
+
+  | Design                                  | 1 core  | 14 cores | 14 cores + writer | Writer's rate | Add 10k symbols |
+  |-----------------------------------------|---------|----------|-------------------|---------------|-----------------|
+  | One RWMutex                             | 21.5 ns | 125 ns   | 132 ns            | 0.17M/s       | 0.87 ms         |
+  | 64 RWMutex shards                       | 25.0 ns | 14.2 ns  | 19.2 ns           | 0.16M/s       | 1.0 ms          |
+  | `atomic.Pointer` to a copy-on-write map | 16.4 ns | 3.2 ns   | 3.7 ns            | 1.73M/s       | 1.5 s           |
+  | `sync.Map` of `atomic.Pointer` (used)   | 22.7 ns | 3.4 ns   | 3.0 ns            | 2.23M/s       | 1.5 ms          |
+
+  A single RWMutex gets slower as cores are added, because every `RLock`
+  writes the same counter. Sharding spreads that out but still slows the
+  writer, which is the feed, to under 0.2M quotes/s. A copy-on-write map
+  reads as fast as the `sync.Map`, but copies itself for every new symbol,
+  which is quadratic. Run them with
+  `go test -run '^$' -bench QuoteCache -cpu 1,14 ./internal/marketdata`.
 
 ## Running
 
