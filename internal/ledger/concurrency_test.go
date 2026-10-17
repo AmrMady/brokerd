@@ -44,7 +44,7 @@ func TestConcurrentHoldsAndFills(t *testing.T) {
 		price := decimal.New(int64(90+i%10), 0)
 		fee := dec("1")
 		switch i % 4 {
-		case 0, 1: // Buy one share: reserve $100 + $1 fee, fill at $90-99.
+		case 0, 1: // Buy one share: reserve $100 + $1 fee, fill at $90-99, release the rest.
 			h, err := l.placeHold(holdKey, owner, ledger.USD, "101")
 			if errors.Is(err, ledger.ErrInsufficientFunds) {
 				rejected.Add(1)
@@ -62,8 +62,12 @@ func TestConcurrentHoldsAndFills(t *testing.T) {
 				t.Errorf("buy %d: %v", i, err)
 				return
 			}
+			if _, err = l.releaseHold(h.ID); err != nil {
+				t.Errorf("release after buy %d: %v", i, err)
+				return
+			}
 			fills.Add(1)
-			record(price.Add(fee).Neg(), dec("1"), 2, 1)
+			record(price.Add(fee).Neg(), dec("1"), 3, 1)
 
 		case 2: // Reserve cash for an order, then cancel it.
 			h, err := l.placeHold(holdKey, owner, ledger.USD, "101")

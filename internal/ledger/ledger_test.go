@@ -144,17 +144,23 @@ func TestSettleBuyFill(t *testing.T) {
 		t.Errorf("fill entry = %+v, want a trade_fill with notional 495", e)
 	}
 
-	l.wantBalance(t, alice, ledger.USD, "500", "0")
+	// The fill used 500 of the 505. The rest stays held until the order is
+	// done and the hold is released.
+	l.wantBalance(t, alice, ledger.USD, "500", "5")
 	l.wantBalance(t, alice, "AAPL", "10", "0")
 	l.wantBalance(t, ledger.Clearing, ledger.USD, "495", "0")
 	l.wantBalance(t, ledger.Clearing, "AAPL", "-10", "0")
 	l.wantBalance(t, ledger.Fees, ledger.USD, "5", "0")
-
-	settled, err := ledger.HoldByID(l.ctx, l.pool, h.ID)
-	noErr(t, err)
-	if settled.Status != ledger.HoldSettled || e.HoldID != h.ID {
-		t.Errorf("hold %+v, entry hold %d: want hold %d settled by the entry", settled, e.HoldID, h.ID)
+	if e.HoldID != h.ID {
+		t.Errorf("entry hold = %d, want %d", e.HoldID, h.ID)
 	}
+
+	released, err := l.releaseHold(h.ID)
+	noErr(t, err)
+	if released.Status != ledger.HoldReleased || !released.Remaining.Equal(dec("5")) {
+		t.Errorf("released hold = %+v, want released with 5 remaining", released)
+	}
+	l.wantBalance(t, alice, ledger.USD, "500", "0")
 	l.requireReconciled(t)
 }
 
@@ -220,7 +226,8 @@ func TestSettleFillHoldRules(t *testing.T) {
 	_, err = l.settle(buy("f2", h1.ID, "50"))
 	wantErr(t, err, ledger.ErrHoldClosed)
 
-	h2, err := l.placeHold("h2", alice, ledger.USD, "100")
+	// A hold that fills have used up is settled and can't be released.
+	h2, err := l.placeHold("h2", alice, ledger.USD, "51")
 	noErr(t, err)
 	_, err = l.settle(buy("f3", h2.ID, "50"))
 	noErr(t, err)

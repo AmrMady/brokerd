@@ -232,7 +232,7 @@ func (s *simulation) release() {
 		return
 	}
 	acct := s.account(h.AccountID, h.Asset)
-	acct.held = acct.held.Sub(h.Amount)
+	acct.held = acct.held.Sub(h.Remaining)
 	s.holds = append(s.holds[:i], s.holds[i+1:]...)
 	s.remember(doneRequest{
 		name: op,
@@ -253,8 +253,8 @@ func (s *simulation) settle() {
 	exceed := s.rng.IntN(10) == 0
 	if h.Asset == ledger.USD {
 		f.Side, f.Symbol = ledger.Buy, pick(s.rng, simSymbols)
-		f.Fee = decimal.Min(s.cents(0, 500), h.Amount)
-		maxQty := h.Amount.Sub(f.Fee).Div(f.Price).Truncate(9)
+		f.Fee = decimal.Min(s.cents(0, 500), h.Remaining)
+		maxQty := h.Remaining.Sub(f.Fee).Div(f.Price).Truncate(9)
 		f.Quantity = s.portion(maxQty)
 		if exceed {
 			f.Quantity = maxQty.Add(decimal.NewFromInt(1))
@@ -262,9 +262,9 @@ func (s *simulation) settle() {
 	} else {
 		f.Side, f.Symbol = ledger.Sell, h.Asset
 		f.Fee = s.cents(0, 200)
-		f.Quantity = s.portion(h.Amount)
+		f.Quantity = s.portion(h.Remaining)
 		if exceed {
-			f.Quantity = h.Amount.Add(decimal.New(1, -9))
+			f.Quantity = h.Remaining.Add(decimal.New(1, -9))
 		}
 	}
 	op := fmt.Sprintf("%s %s %s at %s, fee %s, against hold %d", f.Side, f.Quantity, f.Symbol, f.Price, f.Fee, h.ID)
@@ -280,7 +280,7 @@ func (s *simulation) settle() {
 	switch {
 	case notional.IsZero():
 		want = ledger.ErrInvalid
-	case need.GreaterThan(h.Amount):
+	case need.GreaterThan(h.Remaining):
 		want = ledger.ErrHoldExceeded
 	case f.Side == ledger.Sell && cash.available().Add(notional).Sub(f.Fee).IsNegative():
 		want = ledger.ErrInsufficientFunds
@@ -292,14 +292,17 @@ func (s *simulation) settle() {
 	}
 	if f.Side == ledger.Buy {
 		cash.balance = cash.balance.Sub(need)
-		cash.held = cash.held.Sub(h.Amount)
+		cash.held = cash.held.Sub(need)
 		shares.balance = shares.balance.Add(f.Quantity)
 	} else {
 		shares.balance = shares.balance.Sub(f.Quantity)
-		shares.held = shares.held.Sub(h.Amount)
+		shares.held = shares.held.Sub(need)
 		cash.balance = cash.balance.Add(notional).Sub(f.Fee)
 	}
-	s.holds = append(s.holds[:i], s.holds[i+1:]...)
+	// A fill that uses up the hold settles it; otherwise more fills can follow.
+	if s.holds[i].Remaining = h.Remaining.Sub(need); s.holds[i].Remaining.IsZero() {
+		s.holds = append(s.holds[:i], s.holds[i+1:]...)
+	}
 	s.remember(doneRequest{
 		name: op,
 		id:   e.ID,

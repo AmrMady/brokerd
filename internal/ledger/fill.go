@@ -116,10 +116,11 @@ func (f Fill) metadata() map[string]string {
 	}
 }
 
-// SettleFill posts f and closes its hold. The part of the hold the fill
-// didn't use becomes available again. A fill that needs more than its hold
-// fails with ErrHoldExceeded. Settling the same fill twice returns the
-// original entry.
+// SettleFill posts f and takes what it costs out of its hold. An order can
+// fill in several parts, so the hold stays active until fills use all of it
+// or ReleaseHold returns the rest. A fill that needs more than what's left of
+// the hold fails with ErrHoldExceeded. Settling the same fill twice returns
+// the original entry.
 func SettleFill(ctx context.Context, tx pgx.Tx, f Fill) (Entry, error) {
 	if err := f.validate(); err != nil {
 		return Entry{}, err
@@ -146,21 +147,10 @@ func SettleFill(ctx context.Context, tx pgx.Tx, f Fill) (Entry, error) {
 		return Entry{}, err
 	}
 
-	hold, closed, err := closeHold(ctx, tx, f.HoldID, HoldSettled)
-	if err != nil {
+	ref, need := f.holdNeeds()
+	held := pending.accounts[ref]
+	if _, err = consumeHold(ctx, tx, f.HoldID, held, need); err != nil {
 		return Entry{}, err
 	}
-	if !closed {
-		return Entry{}, fmt.Errorf("%w: hold %d is %s", ErrHoldClosed, f.HoldID, hold.Status)
-	}
-	ref, need := f.holdNeeds()
-	if hold.ledgerAccountID != pending.accounts[ref] {
-		return Entry{}, fmt.Errorf("%w: fill %q needs a hold on %s, hold %d is on %s/%s",
-			ErrInvalid, f.ID, ref, f.HoldID, hold.AccountID, hold.Asset)
-	}
-	if need.GreaterThan(hold.Amount) {
-		return Entry{}, fmt.Errorf("%w: fill %q needs %s %s, hold %d reserved %s",
-			ErrHoldExceeded, f.ID, need, ref.asset, f.HoldID, hold.Amount)
-	}
-	return pending.finish(ctx, tx, map[int64]decimal.Decimal{hold.ledgerAccountID: hold.Amount.Neg()})
+	return pending.finish(ctx, tx, map[int64]decimal.Decimal{held: need.Neg()})
 }

@@ -13,7 +13,7 @@ import (
 const (
 	CheckAssetTotal = "asset_total" // lines of each asset sum to zero
 	CheckBalance    = "balance"     // balance equals the sum of the account's lines
-	CheckHeld       = "held"        // held equals the sum of the account's active holds
+	CheckHeld       = "held"        // held equals what's left of the account's active holds
 	CheckAvailable  = "available"   // customer accounts have no negative available balance
 )
 
@@ -59,7 +59,7 @@ var reconcileQueries = []struct {
 		SELECT la.account_id::text, la.asset, COALESCE(h.total, 0), la.held
 		FROM ledger_accounts la
 		LEFT JOIN (
-			SELECT ledger_account_id, SUM(amount) AS total FROM holds WHERE status = 'active' GROUP BY ledger_account_id
+			SELECT ledger_account_id, SUM(remaining) AS total FROM holds WHERE status = 'active' GROUP BY ledger_account_id
 		) h ON h.ledger_account_id = la.id
 		WHERE la.held <> COALESCE(h.total, 0)`},
 	{CheckAvailable, `

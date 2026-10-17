@@ -10,7 +10,8 @@ Done:
 
 - Ledger: brokerage accounts holding USD cash and fractional share positions
   in Postgres. Deposits, withdrawals, holds for open orders, settlement of
-  trade fills with fees, balances, account history and a reconcile command.
+  trade fills (including partial fills) with fees, balances, account history
+  and a reconcile command.
 
 Planned:
 
@@ -52,8 +53,9 @@ Some notes on how it works:
   status change is recorded with a reason. Writes take a shared lock on the
   account row first, so a close waits for postings in flight.
 - A hold reserves cash or shares for an open order (`available = balance -
-  held`). Releasing and settling a hold are both conditional updates on
-  `status = 'active'`, so a cancel and a fill can't both go through.
+  held`). Each fill takes its cost out of the hold with a conditional update,
+  so concurrent fills queue on the hold and can't use more than is left. What
+  the fills don't use is released when the order is done or canceled.
 - Deposits, withdrawals, holds and fills take an idempotency key, scoped to
   the account. Retrying a request returns the original result; reusing a key
   for a different request is an error.
