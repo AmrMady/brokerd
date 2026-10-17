@@ -85,7 +85,10 @@ func SetAccountStatus(ctx context.Context, tx pgx.Tx, id string, status AccountS
 	if status != AccountActive && status != AccountRestricted {
 		return Account{}, fmt.Errorf("%w: status must be active or restricted, got %q", ErrInvalid, status)
 	}
-	a, err := lockAccountForUpdate(ctx, tx, id, reason)
+	if err := validateReason(reason); err != nil {
+		return Account{}, err
+	}
+	a, err := lockAccountForUpdate(ctx, tx, id)
 	if err != nil {
 		return Account{}, err
 	}
@@ -100,9 +103,13 @@ func SetAccountStatus(ctx context.Context, tx pgx.Tx, id string, status AccountS
 }
 
 // CloseAccount closes an account whose balances and holds are all zero and
-// records why. Closing a closed account is a no-op.
+// that has no pending transfers, and records why. Closing a closed account
+// is a no-op.
 func CloseAccount(ctx context.Context, tx pgx.Tx, id, reason string) (Account, error) {
-	a, err := lockAccountForUpdate(ctx, tx, id, reason)
+	if err := validateReason(reason); err != nil {
+		return Account{}, err
+	}
+	a, err := lockAccountForUpdate(ctx, tx, id)
 	if err != nil || a.Status == AccountClosed {
 		return a, err
 	}
@@ -112,6 +119,9 @@ func CloseAccount(ctx context.Context, tx pgx.Tx, id, reason string) (Account, e
 		SELECT EXISTS (
 			SELECT 1 FROM ledger_accounts
 			WHERE account_id = $1 AND (balance <> 0 OR held <> 0)
+		) OR EXISTS (
+			SELECT 1 FROM transfers
+			WHERE account_id = $1 AND status = 'pending'
 		)`, id).Scan(&notEmpty)
 	if err != nil {
 		return Account{}, fmt.Errorf("check balances of %s: %w", id, err)
@@ -151,15 +161,19 @@ func scanStatusChange(row pgx.CollectableRow) (StatusChange, error) {
 // lockAccountForUpdate takes the exclusive lock status changes need. It waits
 // for writes holding the shared lock (see lockAccount), so balances read
 // afterwards can't change until the transaction ends.
-func lockAccountForUpdate(ctx context.Context, tx pgx.Tx, id, reason string) (Account, error) {
+func lockAccountForUpdate(ctx context.Context, tx pgx.Tx, id string) (Account, error) {
 	if err := validateCustomer(id); err != nil {
 		return Account{}, err
 	}
-	if reason == "" {
-		return Account{}, fmt.Errorf("%w: a reason is required", ErrInvalid)
-	}
 	return getAccount(tx.QueryRow(ctx, `
 		SELECT `+accountColumns+` FROM accounts WHERE id = $1 AND kind = 'customer' FOR UPDATE`, id), id)
+}
+
+func validateReason(reason string) error {
+	if reason == "" {
+		return fmt.Errorf("%w: a reason is required", ErrInvalid)
+	}
+	return nil
 }
 
 func changeStatus(ctx context.Context, tx pgx.Tx, a Account, to AccountStatus, reason string) (Account, error) {

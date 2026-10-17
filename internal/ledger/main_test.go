@@ -67,15 +67,25 @@ func (l testLedger) openAccount(t *testing.T) string {
 	return a.ID
 }
 
-func (l testLedger) deposit(key, owner, amount string) (ledger.Entry, error) {
-	return inTx(l, func(tx pgx.Tx) (ledger.Entry, error) {
-		return ledger.Deposit(l.ctx, tx, ledger.CashTransfer{IdempotencyKey: key, AccountID: owner, Amount: dec(amount)})
-	})
+// deposit and withdraw request a transfer and complete it in the same
+// transaction, as if the bank confirmed it right away.
+func (l testLedger) deposit(key, account, amount string) (ledger.Transfer, error) {
+	return l.transfer(ledger.RequestDeposit, key, account, amount)
 }
 
-func (l testLedger) withdraw(key, owner, amount string) (ledger.Entry, error) {
-	return inTx(l, func(tx pgx.Tx) (ledger.Entry, error) {
-		return ledger.Withdraw(l.ctx, tx, ledger.CashTransfer{IdempotencyKey: key, AccountID: owner, Amount: dec(amount)})
+func (l testLedger) withdraw(key, account, amount string) (ledger.Transfer, error) {
+	return l.transfer(ledger.RequestWithdrawal, key, account, amount)
+}
+
+type transferRequest func(context.Context, pgx.Tx, ledger.CashTransfer) (ledger.Transfer, error)
+
+func (l testLedger) transfer(request transferRequest, key, account, amount string) (ledger.Transfer, error) {
+	return inTx(l, func(tx pgx.Tx) (ledger.Transfer, error) {
+		tr, err := request(l.ctx, tx, ledger.CashTransfer{IdempotencyKey: key, AccountID: account, Amount: dec(amount)})
+		if err != nil {
+			return tr, err
+		}
+		return ledger.CompleteTransfer(l.ctx, tx, tr.ID)
 	})
 }
 

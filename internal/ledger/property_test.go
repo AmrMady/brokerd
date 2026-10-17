@@ -120,9 +120,10 @@ func pick[T any](rng *rand.Rand, xs []T) T {
 	return xs[rng.IntN(len(xs))]
 }
 
-func entryID(e ledger.Entry, err error) (int64, error) { return e.ID, err }
-func holdID(h ledger.Hold, err error) (int64, error)   { return h.ID, err }
-func errOf[T any](_ T, err error) error                { return err }
+func entryID(e ledger.Entry, err error) (int64, error)       { return e.ID, err }
+func transferID(t ledger.Transfer, err error) (int64, error) { return t.ID, err }
+func holdID(h ledger.Hold, err error) (int64, error)         { return h.ID, err }
+func errOf[T any](_ T, err error) error                      { return err }
 
 // expect checks err against want (nil means success) and reports whether the operation succeeded.
 func (s *simulation) expect(op string, err, want error) bool {
@@ -153,7 +154,7 @@ func (s *simulation) deposit() {
 		name: op,
 		id:   e.ID,
 		replay: func() (int64, error) {
-			return entryID(s.l.deposit(key, owner, amount.String()))
+			return transferID(s.l.deposit(key, owner, amount.String()))
 		},
 		conflict: func() error {
 			return errOf(s.l.deposit(key, owner, amount.Mul(decimal.NewFromInt(2)).String()))
@@ -178,7 +179,7 @@ func (s *simulation) withdraw() {
 		name: op,
 		id:   e.ID,
 		replay: func() (int64, error) {
-			return entryID(s.l.withdraw(key, owner, amount.String()))
+			return transferID(s.l.withdraw(key, owner, amount.String()))
 		},
 		conflict: func() error {
 			return errOf(s.l.withdraw(key, owner, amount.Mul(decimal.NewFromInt(2)).String()))

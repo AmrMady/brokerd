@@ -15,15 +15,17 @@ type Asset string
 // USD is the cash asset.
 const USD Asset = "USD"
 
-// System accounts, created by the first migration. They are the other side
-// of every movement, and their balances can go negative.
+// System accounts, created by the migrations. They are the other side of
+// every movement, and their balances can go negative. Deficits is what
+// customers owe the firm after a returned deposit they had already spent.
 const (
 	ExternalBank = "00000000-0000-0000-0000-000000000001"
 	Clearing     = "00000000-0000-0000-0000-000000000002"
 	Fees         = "00000000-0000-0000-0000-000000000003"
+	Deficits     = "00000000-0000-0000-0000-000000000004"
 )
 
-var systemAccounts = []string{ExternalBank, Clearing, Fees}
+var systemAccounts = []string{ExternalBank, Clearing, Fees, Deficits}
 
 var symbolPattern = regexp.MustCompile(`^[A-Z][A-Z0-9.]{0,9}$`)
 

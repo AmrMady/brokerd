@@ -15,12 +15,13 @@ import (
 )
 
 type posting struct {
-	account  string // the customer account the idempotency key belongs to
-	key      string
-	kind     Kind
-	holdID   int64
-	metadata map[string]string
-	lines    []Line
+	account    string // the customer account the idempotency key belongs to
+	key        string // empty for postings made idempotent some other way
+	kind       Kind
+	holdID     int64
+	transferID int64
+	metadata   map[string]string
+	lines      []Line
 }
 
 func validateLines(lines []Line) error {
@@ -87,16 +88,13 @@ type pendingEntry struct {
 	accounts  map[accountRef]int64
 }
 
-// startEntry validates p, creates any missing ledger accounts, claims the
-// idempotency key and inserts the journal entry. If the same request was
-// already posted under the key, it returns the existing entry and a nil
-// pendingEntry.
-func startEntry(ctx context.Context, tx pgx.Tx, p posting) (*pendingEntry, Entry, error) {
+// prepareEntry validates p and creates any missing ledger accounts.
+func prepareEntry(ctx context.Context, tx pgx.Tx, p posting) (*pendingEntry, error) {
 	if err := validateLines(p.lines); err != nil {
-		return nil, Entry{}, err
+		return nil, err
 	}
 	if err := checkScales(ctx, tx, p.lines); err != nil {
-		return nil, Entry{}, err
+		return nil, err
 	}
 	if p.metadata == nil {
 		p.metadata = map[string]string{}
@@ -107,9 +105,37 @@ func startEntry(ctx context.Context, tx pgx.Tx, p posting) (*pendingEntry, Entry
 	}
 	accounts, err := resolveAccounts(ctx, tx, refs)
 	if err != nil {
+		return nil, err
+	}
+	return &pendingEntry{posting: p, accounts: accounts}, nil
+}
+
+// insert writes the journal entry row and points its idempotency key, if it
+// has one, at it.
+func (p *pendingEntry) insert(ctx context.Context, tx pgx.Tx) error {
+	err := tx.QueryRow(ctx, `
+		INSERT INTO journal_entries (kind, hold_id, transfer_id, metadata)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id, created_at`,
+		p.kind, nullable(p.holdID), nullable(p.transferID), p.metadata,
+	).Scan(&p.id, &p.createdAt)
+	if err != nil {
+		return fmt.Errorf("insert journal entry: %w", err)
+	}
+	if p.key == "" {
+		return nil
+	}
+	return recordKey(ctx, tx, p.account, p.key, keyResult{entryID: p.id})
+}
+
+// startEntry prepares p, claims its idempotency key and inserts the journal
+// entry. If the same request was already posted under the key, it returns
+// the existing entry and a nil pendingEntry.
+func startEntry(ctx context.Context, tx pgx.Tx, p posting) (*pendingEntry, Entry, error) {
+	pending, err := prepareEntry(ctx, tx, p)
+	if err != nil {
 		return nil, Entry{}, err
 	}
-
 	hash := p.hash()
 	claimed, err := claimKey(ctx, tx, p.account, p.key, hash)
 	if err != nil {
@@ -120,35 +146,21 @@ func startEntry(ctx context.Context, tx pgx.Tx, p posting) (*pendingEntry, Entry
 		existing, err = replayEntry(ctx, tx, p.account, p.key, hash)
 		return nil, existing, err
 	}
-
-	pending := &pendingEntry{posting: p, accounts: accounts}
-	err = tx.QueryRow(ctx, `
-		WITH e AS (
-			INSERT INTO journal_entries (kind, hold_id, metadata)
-			VALUES ($3, $4, $5)
-			RETURNING id, created_at
-		)
-		UPDATE idempotency_keys k SET entry_id = e.id
-		FROM e
-		WHERE k.account_id = $1 AND k.idempotency_key = $2
-		RETURNING e.id, e.created_at`,
-		p.account, p.key, p.kind, nullable(p.holdID), p.metadata,
-	).Scan(&pending.id, &pending.createdAt)
-	if err != nil {
-		return nil, Entry{}, fmt.Errorf("insert journal entry: %w", err)
+	if err = pending.insert(ctx, tx); err != nil {
+		return nil, Entry{}, err
 	}
 	return pending, Entry{}, nil
 }
 
 func replayEntry(ctx context.Context, tx pgx.Tx, account, key string, hash []byte) (Entry, error) {
-	entryID, _, err := usedKey(ctx, tx, account, key, hash)
+	used, err := usedKey(ctx, tx, account, key, hash)
 	if err != nil {
 		return Entry{}, err
 	}
-	if entryID == 0 {
+	if used.entryID == 0 {
 		return Entry{}, fmt.Errorf("%w: %q", ErrIdempotencyConflict, key)
 	}
-	return loadEntry(ctx, tx, entryID)
+	return loadEntry(ctx, tx, used.entryID)
 }
 
 func (p *pendingEntry) accountID(l Line) int64 {
@@ -197,29 +209,28 @@ func (p *pendingEntry) finish(ctx context.Context, tx pgx.Tx, heldChanges map[in
 	lines := slices.Clone(p.lines)
 	sortLines(lines)
 	return Entry{
-		ID:        p.id,
-		Kind:      p.kind,
-		HoldID:    p.holdID,
-		Metadata:  p.metadata,
-		Lines:     lines,
-		CreatedAt: p.createdAt,
+		ID:         p.id,
+		Kind:       p.kind,
+		HoldID:     p.holdID,
+		TransferID: p.transferID,
+		Metadata:   p.metadata,
+		Lines:      lines,
+		CreatedAt:  p.createdAt,
 	}, nil
 }
 
 func loadEntry(ctx context.Context, q Querier, id int64) (Entry, error) {
 	e := Entry{ID: id}
-	var holdID *int64
+	var holdID, transferID *int64
 	err := q.QueryRow(ctx, `
-		SELECT kind, hold_id, metadata, created_at
+		SELECT kind, hold_id, transfer_id, metadata, created_at
 		FROM journal_entries
 		WHERE id = $1`, id,
-	).Scan(&e.Kind, &holdID, &e.Metadata, &e.CreatedAt)
+	).Scan(&e.Kind, &holdID, &transferID, &e.Metadata, &e.CreatedAt)
 	if err != nil {
 		return Entry{}, fmt.Errorf("load journal entry %d: %w", id, err)
 	}
-	if holdID != nil {
-		e.HoldID = *holdID
-	}
+	e.HoldID, e.TransferID = deref(holdID), deref(transferID)
 
 	rows, err := q.Query(ctx, `
 		SELECT la.account_id::text, l.asset, l.amount
@@ -241,11 +252,4 @@ func scanLine(row pgx.CollectableRow) (Line, error) {
 	var l Line
 	err := row.Scan(&l.AccountID, &l.Asset, &l.Amount)
 	return l, err
-}
-
-func nullable(id int64) *int64 {
-	if id == 0 {
-		return nil
-	}
-	return &id
 }

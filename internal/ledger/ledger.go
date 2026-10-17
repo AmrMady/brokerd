@@ -27,7 +27,9 @@ var (
 	ErrAccountNotFound     = errors.New("account not found")
 	ErrAccountRestricted   = errors.New("account is restricted")
 	ErrAccountClosed       = errors.New("account is closed")
-	ErrAccountNotEmpty     = errors.New("account still has balances or holds")
+	ErrAccountNotEmpty     = errors.New("account still has balances, holds or pending transfers")
+	ErrTransferNotFound    = errors.New("transfer not found")
+	ErrTransferStatus      = errors.New("transfer status doesn't allow this")
 )
 
 // Querier is implemented by *pgxpool.Pool, *pgx.Conn and pgx.Tx.
@@ -41,9 +43,11 @@ type Kind string
 
 // Entry kinds.
 const (
-	KindDeposit    Kind = "deposit"
-	KindWithdrawal Kind = "withdrawal"
-	KindTradeFill  Kind = "trade_fill"
+	KindDeposit          Kind = "deposit"
+	KindWithdrawal       Kind = "withdrawal"
+	KindDepositReturn    Kind = "deposit_return"
+	KindWithdrawalReturn Kind = "withdrawal_return"
+	KindTradeFill        Kind = "trade_fill"
 )
 
 // Line adds Amount of Asset to an account. Negative amounts take it away.
@@ -55,15 +59,16 @@ type Line struct {
 
 // Entry is a set of lines, summing to zero per asset, posted atomically.
 type Entry struct {
-	ID        int64
-	Kind      Kind
-	HoldID    int64 // hold the entry settled, if any
-	Metadata  map[string]string
-	Lines     []Line
-	CreatedAt time.Time
+	ID         int64
+	Kind       Kind
+	HoldID     int64 // hold the entry took from, if any
+	TransferID int64 // transfer the entry booked, if any
+	Metadata   map[string]string
+	Lines      []Line
+	CreatedAt  time.Time
 }
 
-// CashTransfer is a deposit or withdrawal request.
+// CashTransfer is a request to deposit or withdraw cash.
 type CashTransfer struct {
 	IdempotencyKey string
 	AccountID      string
@@ -78,56 +83,6 @@ func (c CashTransfer) validate() error {
 		return err
 	}
 	return checkPositive("amount", c.Amount, usdScale)
-}
-
-// Deposit moves cash from the external bank into an account. Closed accounts
-// can't receive deposits.
-func Deposit(ctx context.Context, tx pgx.Tx, c CashTransfer) (Entry, error) {
-	if err := c.validate(); err != nil {
-		return Entry{}, err
-	}
-	return postEntry(ctx, tx, posting{
-		account: c.AccountID,
-		key:     c.IdempotencyKey,
-		kind:    KindDeposit,
-		lines: []Line{
-			{AccountID: ExternalBank, Asset: USD, Amount: c.Amount.Neg()},
-			{AccountID: c.AccountID, Asset: USD, Amount: c.Amount},
-		},
-	}, AccountActive, AccountRestricted)
-}
-
-// Withdraw moves cash from an account to the external bank. It fails with
-// ErrInsufficientFunds if the amount is more than the available balance, and
-// only active accounts can withdraw.
-func Withdraw(ctx context.Context, tx pgx.Tx, c CashTransfer) (Entry, error) {
-	if err := c.validate(); err != nil {
-		return Entry{}, err
-	}
-	return postEntry(ctx, tx, posting{
-		account: c.AccountID,
-		key:     c.IdempotencyKey,
-		kind:    KindWithdrawal,
-		lines: []Line{
-			{AccountID: c.AccountID, Asset: USD, Amount: c.Amount.Neg()},
-			{AccountID: ExternalBank, Asset: USD, Amount: c.Amount},
-		},
-	}, AccountActive)
-}
-
-func postEntry(ctx context.Context, tx pgx.Tx, p posting, allowed ...AccountStatus) (Entry, error) {
-	status, err := lockAccount(ctx, tx, p.account)
-	if err != nil {
-		return Entry{}, err
-	}
-	pending, replayed, err := startEntry(ctx, tx, p)
-	if err != nil || pending == nil {
-		return replayed, err
-	}
-	if err = requireStatus(p.account, status, allowed...); err != nil {
-		return Entry{}, err
-	}
-	return pending.finish(ctx, tx, nil)
 }
 
 func validateKey(key string) error {

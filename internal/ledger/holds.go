@@ -96,37 +96,41 @@ func PlaceHold(ctx context.Context, tx pgx.Tx, r HoldRequest) (Hold, error) {
 	}
 
 	h := Hold{AccountID: r.AccountID, Asset: r.Asset, Amount: r.Amount, Remaining: r.Amount, Status: HoldActive}
-	err = tx.QueryRow(ctx, `
-		WITH h AS (
-			INSERT INTO holds (ledger_account_id, amount, remaining)
-			VALUES ($3, $4, $4)
-			RETURNING id, created_at
-		)
-		UPDATE idempotency_keys k SET hold_id = h.id
-		FROM h
-		WHERE k.account_id = $1 AND k.idempotency_key = $2
-		RETURNING h.id, h.created_at`,
-		r.AccountID, r.IdempotencyKey, ids[ref], r.Amount,
-	).Scan(&h.ID, &h.CreatedAt)
-	if err != nil {
-		return Hold{}, fmt.Errorf("insert hold: %w", err)
+	if h.ID, h.CreatedAt, err = reserve(ctx, tx, ids[ref], r.Amount); err != nil {
+		return Hold{}, err
 	}
-
-	if _, err = applyChanges(ctx, tx, map[int64]change{ids[ref]: {held: r.Amount}}); err != nil {
+	if err = recordKey(ctx, tx, r.AccountID, r.IdempotencyKey, keyResult{holdID: h.ID}); err != nil {
 		return Hold{}, err
 	}
 	return h, nil
 }
 
+// reserve inserts a hold on a ledger account and adds it to the held amount.
+func reserve(ctx context.Context, tx pgx.Tx, ledgerAccountID int64, amount decimal.Decimal) (id int64, createdAt time.Time, err error) {
+	err = tx.QueryRow(ctx, `
+		INSERT INTO holds (ledger_account_id, amount, remaining)
+		VALUES ($1, $2, $2)
+		RETURNING id, created_at`,
+		ledgerAccountID, amount,
+	).Scan(&id, &createdAt)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("insert hold: %w", err)
+	}
+	if _, err = applyChanges(ctx, tx, map[int64]change{ledgerAccountID: {held: amount}}); err != nil {
+		return 0, time.Time{}, err
+	}
+	return id, createdAt, nil
+}
+
 func replayHold(ctx context.Context, tx pgx.Tx, account, key string, hash []byte) (Hold, error) {
-	_, holdID, err := usedKey(ctx, tx, account, key, hash)
+	used, err := usedKey(ctx, tx, account, key, hash)
 	if err != nil {
 		return Hold{}, err
 	}
-	if holdID == 0 {
+	if used.holdID == 0 {
 		return Hold{}, fmt.Errorf("%w: %q", ErrIdempotencyConflict, key)
 	}
-	return HoldByID(ctx, tx, holdID)
+	return HoldByID(ctx, tx, used.holdID)
 }
 
 // ReleaseHold closes an active hold and makes what's left of it available
@@ -140,6 +144,12 @@ func ReleaseHold(ctx context.Context, tx pgx.Tx, holdID int64) (Hold, error) {
 	if _, err = lockAccount(ctx, tx, current.AccountID); err != nil {
 		return Hold{}, err
 	}
+	return release(ctx, tx, holdID)
+}
+
+// release closes an active hold and takes what's left of it out of the held
+// amount. The caller holds the account lock.
+func release(ctx context.Context, tx pgx.Tx, holdID int64) (Hold, error) {
 	h, err := scanHold(tx.QueryRow(ctx, `
 		UPDATE holds h
 		SET status = 'released', closed_at = now()
@@ -149,13 +159,13 @@ func ReleaseHold(ctx context.Context, tx pgx.Tx, holdID int64) (Hold, error) {
 		holdID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		// No longer active; read it again to see what closed it.
-		if current, err = loadHold(ctx, tx, holdID); err != nil {
+		if h, err = loadHold(ctx, tx, holdID); err != nil {
 			return Hold{}, err
 		}
-		if current.Status == HoldReleased {
-			return current.Hold, nil
+		if h.Status == HoldReleased {
+			return h.Hold, nil
 		}
-		return Hold{}, fmt.Errorf("%w: hold %d is %s", ErrHoldClosed, holdID, current.Status)
+		return Hold{}, fmt.Errorf("%w: hold %d is %s", ErrHoldClosed, holdID, h.Status)
 	}
 	if err != nil {
 		return Hold{}, fmt.Errorf("release hold %d: %w", holdID, err)
@@ -213,33 +223,31 @@ func loadHold(ctx context.Context, q Querier, id int64) (holdRow, error) {
 // settles the hold if that uses it up. The conditional UPDATE makes this
 // safe under concurrency: fills against the same hold queue on its row, and
 // each one checks what the previous one left.
-func consumeHold(ctx context.Context, tx pgx.Tx, id, ledgerAccountID int64, amount decimal.Decimal) (holdRow, error) {
-	h, err := scanHold(tx.QueryRow(ctx, `
-		UPDATE holds h
-		SET remaining = h.remaining - $3,
-		    status = CASE WHEN h.remaining = $3 THEN 'settled' ELSE h.status END,
-		    closed_at = CASE WHEN h.remaining = $3 THEN now() END
-		FROM ledger_accounts la
-		WHERE h.id = $1 AND h.ledger_account_id = $2 AND h.status = 'active' AND h.remaining >= $3
-		  AND la.id = h.ledger_account_id
-		RETURNING `+holdColumns,
-		id, ledgerAccountID, amount))
-	if err == nil {
-		return h, nil
+func consumeHold(ctx context.Context, tx pgx.Tx, id, ledgerAccountID int64, amount decimal.Decimal) error {
+	tag, err := tx.Exec(ctx, `
+		UPDATE holds
+		SET remaining = remaining - $3,
+		    status = CASE WHEN remaining = $3 THEN 'settled' ELSE status END,
+		    closed_at = CASE WHEN remaining = $3 THEN now() END
+		WHERE id = $1 AND ledger_account_id = $2 AND status = 'active' AND remaining >= $3`,
+		id, ledgerAccountID, amount)
+	if err != nil {
+		return fmt.Errorf("use hold %d: %w", id, err)
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return holdRow{}, fmt.Errorf("use hold %d: %w", id, err)
+	if tag.RowsAffected() == 1 {
+		return nil
 	}
 
-	if h, err = loadHold(ctx, tx, id); err != nil {
-		return holdRow{}, err
+	h, err := loadHold(ctx, tx, id)
+	if err != nil {
+		return err
 	}
 	switch {
 	case h.Status != HoldActive:
-		return holdRow{}, fmt.Errorf("%w: hold %d is %s", ErrHoldClosed, id, h.Status)
+		return fmt.Errorf("%w: hold %d is %s", ErrHoldClosed, id, h.Status)
 	case h.ledgerAccountID != ledgerAccountID:
-		return holdRow{}, fmt.Errorf("%w: hold %d is on %s/%s", ErrInvalid, id, h.AccountID, h.Asset)
+		return fmt.Errorf("%w: hold %d is on %s/%s", ErrInvalid, id, h.AccountID, h.Asset)
 	default:
-		return holdRow{}, fmt.Errorf("%w: hold %d has %s left, the fill needs %s", ErrHoldExceeded, id, h.Remaining, amount)
+		return fmt.Errorf("%w: hold %d has %s left, the fill needs %s", ErrHoldExceeded, id, h.Remaining, amount)
 	}
 }

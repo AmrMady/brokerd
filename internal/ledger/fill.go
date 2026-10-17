@@ -149,7 +149,7 @@ func SettleFill(ctx context.Context, tx pgx.Tx, f Fill) (Entry, error) {
 
 	ref, need := f.holdNeeds()
 	held := pending.accounts[ref]
-	if _, err = consumeHold(ctx, tx, f.HoldID, held, need); err != nil {
+	if err = consumeHold(ctx, tx, f.HoldID, held, need); err != nil {
 		return Entry{}, err
 	}
 	return pending.finish(ctx, tx, map[int64]decimal.Decimal{held: need.Neg()})

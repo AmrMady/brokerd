@@ -9,9 +9,10 @@ in progress.
 Done:
 
 - Ledger: brokerage accounts holding USD cash and fractional share positions
-  in Postgres. Deposits, withdrawals, holds for open orders, settlement of
-  trade fills (including partial fills) with fees, balances, account history
-  and a reconcile command.
+  in Postgres. Deposits and withdrawals that go through a bank transfer
+  lifecycle, holds for open orders, settlement of trade fills (including
+  partial fills) with fees, balances, account history and a reconcile
+  command.
 
 Planned:
 
@@ -26,17 +27,19 @@ Planned:
 
 Every change is a journal entry whose lines sum to zero for each asset. Each
 account has one ledger row per asset it holds, carrying the balance. Customer
-accounts sit on one side; the system accounts `external_bank`, `clearing` and
-`fees` (rows in the same `accounts` table) sit on the other.
+accounts sit on one side; the system accounts `external_bank`, `clearing`,
+`fees` and `deficits` (rows in the same `accounts` table) sit on the other.
 
 | Operation         | Lines                                                                              |
 |-------------------|------------------------------------------------------------------------------------|
 | Deposit X         | external_bank -X, customer +X                                                      |
 | Withdraw X        | customer -X, external_bank +X                                                      |
+| Deposit returned  | external_bank +X, customer -a, deficits -(X-a)                                     |
 | Buy q @ p, fee f  | customer USD -(n+f), clearing USD +n, fees +f, clearing SYM -q, customer SYM +q    |
 | Sell q @ p, fee f | customer SYM -q, clearing SYM +q, clearing USD -n, customer USD +(n-f), fees +f    |
 
-`n` is `q * p` rounded half-to-even to the cent.
+`n` is `q * p` rounded half-to-even to the cent. `a` is what the customer
+still has available when a deposit comes back.
 
 Some notes on how it works:
 
@@ -56,7 +59,13 @@ Some notes on how it works:
   held`). Each fill takes its cost out of the hold with a conditional update,
   so concurrent fills queue on the hold and can't use more than is left. What
   the fills don't use is released when the order is done or canceled.
-- Deposits, withdrawals, holds and fills take an idempotency key, scoped to
+- Deposits and withdrawals are transfers. They stay pending until the bank
+  confirms them, and a pending withdrawal holds its cash. Bank events
+  (completed, canceled, returned) are compare-and-sets on the transfer's
+  status, so a repeated event changes nothing and a cancel and a completion
+  can't both win. If a returned deposit was already spent, the `deficits`
+  account covers the difference and the account is restricted.
+- Transfer requests, holds and fills take an idempotency key, scoped to
   the account. Retrying a request returns the original result; reusing a key
   for a different request is an error.
 - Postgres checks the invariants too: a deferred trigger rejects entries that

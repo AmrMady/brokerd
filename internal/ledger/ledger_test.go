@@ -16,10 +16,10 @@ func TestDepositAndWithdraw(t *testing.T) {
 	l := newTestLedger(t)
 	alice := l.openAccount(t)
 
-	e, err := l.deposit("d1", alice, "100.00")
+	d, err := l.deposit("d1", alice, "100.00")
 	noErr(t, err)
-	if e.Kind != ledger.KindDeposit || len(e.Lines) != 2 {
-		t.Errorf("deposit entry = %+v, want a deposit with 2 lines", e)
+	if d.Direction != ledger.DirectionDeposit || d.Status != ledger.TransferCompleted {
+		t.Errorf("deposit = %+v, want a completed deposit", d)
 	}
 	_, err = l.withdraw("w1", alice, "30")
 	noErr(t, err)
@@ -28,8 +28,9 @@ func TestDepositAndWithdraw(t *testing.T) {
 
 	l.wantBalance(t, alice, ledger.USD, "70", "0")
 	l.wantBalance(t, ledger.ExternalBank, ledger.USD, "-70", "0")
-	if v := l.balance(t, alice, ledger.USD).Version; v != 2 {
-		t.Errorf("alice/USD version = %d, want 2", v)
+	// The deposit, the withdrawal's hold and the withdrawal itself.
+	if v := l.balance(t, alice, ledger.USD).Version; v != 3 {
+		t.Errorf("alice/USD version = %d, want 3", v)
 	}
 	l.requireReconciled(t)
 }
