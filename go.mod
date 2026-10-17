@@ -9,6 +9,7 @@ require (
 	github.com/shopspring/decimal v1.5.0
 	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.44.0
+	go.uber.org/goleak v1.3.0
 )
 
 require (

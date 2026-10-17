@@ -1,0 +1,45 @@
+// Package marketdata reads trades and quotes from a feed and checks each
+// symbol's sequence numbers.
+package marketdata
+
+import (
+	"context"
+	"time"
+
+	"github.com/shopspring/decimal"
+)
+
+// Trade is a trade printed for a symbol.
+type Trade struct {
+	Symbol    string
+	Price     decimal.Decimal
+	Size      decimal.Decimal
+	Timestamp time.Time
+	Seq       uint64
+}
+
+// Quote is a symbol's best bid and ask.
+type Quote struct {
+	Symbol    string
+	Bid       decimal.Decimal
+	BidSize   decimal.Decimal
+	Ask       decimal.Decimal
+	AskSize   decimal.Decimal
+	Timestamp time.Time
+	Seq       uint64
+}
+
+// Handler receives a feed's events one at a time, in feed order, on the
+// feed's goroutine. It must not block.
+type Handler interface {
+	HandleTrade(Trade)
+	HandleQuote(Quote)
+}
+
+// Feed is a source of trades and quotes. Each symbol's events, trades and
+// quotes together, carry increasing sequence numbers.
+type Feed interface {
+	// Run sends events to h until the feed ends, and then returns nil, or
+	// until ctx is done, and then returns ctx.Err().
+	Run(ctx context.Context, h Handler) error
+}

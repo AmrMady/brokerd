@@ -1,8 +1,8 @@
 # brokerd
 
 A brokerage backend in Go, built as a paper-trading system: a double-entry
-ledger, market data, and an order engine. The ledger is done; the rest is
-in progress.
+ledger, market data, and an order engine. The ledger is done and market
+data is in progress.
 
 ## Status
 
@@ -14,11 +14,12 @@ Done:
   with fees, SEC and FINRA regulatory fees on sells, T+1 settlement of sale
   proceeds, tax lots with realized gains and losses, reversals, balances,
   account history and a reconcile command.
+- Market data feeds: a seeded random-walk simulator and CSV replay, with
+  per-symbol sequence checks.
 
 Planned:
 
-- Market data: simulated and CSV replay feeds, latest quotes, OHLCV bars,
-  WebSocket streaming
+- Market data: latest quotes, OHLCV bars, WebSocket streaming
 - Paper trading: market and limit orders filled against live quotes
 - REST API, metrics, OpenAPI spec
 - Transactional outbox to Kafka
@@ -105,6 +106,24 @@ Some notes on how it works:
   off.
 - Ledger functions take a `pgx.Tx`, so a caller can post to the ledger and
   write its own rows in one transaction.
+
+## Market data
+
+A feed sends trades and quotes, in order, to a handler on the feed's own
+goroutine. Each symbol's events carry a sequence number.
+
+- The simulator moves each symbol's midpoint by at most a cent per quote,
+  with a spread of one to four cents, and prints trades at the bid or ask.
+  Prices are whole cents internally and event times are spaced `1/rate`
+  apart, so a seed always gives the same events. It runs as fast as it can
+  (about 10M events/s on an Apple M4 Pro) or paced in real time.
+- CSV replay reads `type,symbol,seq,timestamp,price,size,bid,bid_size,ask,ask_size`
+  and can keep the original spacing between events, sped up or not. Bad
+  rows fail with their line number.
+- The sequencer passes on events in order. A symbol's first event starts its
+  sequence; an event that skips ahead is passed on and counted as a gap,
+  and one at or behind the last is dropped and counted as stale. Late
+  events aren't held back to fill a gap: for prices, the newest one wins.
 
 ## Running
 

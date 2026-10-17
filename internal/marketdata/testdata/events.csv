@@ -1,0 +1,5 @@
+type,symbol,seq,timestamp,price,size,bid,bid_size,ask,ask_size
+quote,AAPL,1,2026-10-16T13:30:00Z,,,227.14,300,227.16,200
+trade,AAPL,2,2026-10-16T13:30:00.25Z,227.16,100,,,,
+quote,MSFT,1,2026-10-16T13:30:00.5Z,,,415.20,100,415.25,0
+trade,MSFT,2,2026-10-16T13:30:01Z,415.2,0.5,,,,
