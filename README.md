@@ -15,12 +15,13 @@ Done:
   proceeds, tax lots with realized gains and losses, reversals, balances,
   account history and a reconcile command.
 - Market data: a seeded random-walk simulator and CSV replay, per-symbol
-  sequence checks, a lock-free latest-quote cache, and 1s and 1m OHLCV bars
-  by event time.
+  sequence checks, a lock-free latest-quote cache, 1s and 1m OHLCV bars by
+  event time, and a WebSocket stream that drops and then disconnects slow
+  clients.
 
 Planned:
 
-- Market data: WebSocket streaming
+- Market data: a relay feed from another brokerd, and a command that runs it all
 - Paper trading: market and limit orders filled against live quotes
 - REST API, metrics, OpenAPI spec
 - Transactional outbox to Kafka
@@ -153,6 +154,46 @@ goroutine. Each symbol's events carry a sequence number.
   placed by their own time (open and close follow event time, not arrival);
   trades for a closed window are dropped and counted. A 1s aggregator
   handles about 13M trades/s on one core.
+
+## Streaming
+
+The hub streams trades, quotes and bars over a WebSocket. A client sends
+
+```json
+{"action": "subscribe", "trades": ["AAPL"], "quotes": ["AAPL", "MSFT"], "bars": ["AAPL"]}
+```
+
+(or `"unsubscribe"`), and gets frames that are JSON arrays of messages:
+
+```json
+[{"type":"subscription","trades":["AAPL"],"quotes":["AAPL","MSFT"],"bars":["AAPL"]},
+ {"type":"trade","symbol":"AAPL","price":"227.16","size":"100","timestamp":"2026-10-16T13:30:00Z","seq":2}]
+```
+
+Prices and sizes are strings, so they keep their exact decimal value. A
+subscription's confirmation is always queued before its first event.
+
+The hub runs on the feed's goroutine and must never block it, so a slow
+client can only hurt itself:
+
+- Each event is encoded once, then queued for every client subscribed to
+  it. Each client's queue is a fixed-size ring buffer; when it's full, the
+  oldest message is dropped and counted. A writer goroutine per connection
+  sends up to 256 queued messages per frame.
+- A client is disconnected once it has kept dropping messages for `MaxLag`
+  (5s) without emptying its queue in between, when a single write blocks
+  for `MaxLag`, or when it doesn't answer a ping within `MaxLag`. A client
+  that's cut off for being slow gets no close handshake, which can take
+  10s and which it couldn't keep up with anyway.
+- Shutting down sends every client a "going away" close and waits for each
+  connection to finish. The tests check for leaked goroutines with goleak.
+
+Publishing a trade to 100 subscribers (1,000 clients each subscribed to 10
+of 100 symbols) takes about 29 µs, or 3.4M messages/s, on an Apple M4 Pro.
+With 50 of the clients reading only one message a millisecond, and so
+losing about 2.8 messages for every trade published, it takes about 31 µs:
+slow clients barely touch the publisher. Run it with
+`go test -run '^$' -bench HubFanOut ./internal/stream`.
 
 ## Running
 
