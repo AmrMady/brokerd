@@ -23,24 +23,30 @@ func claimKey(ctx context.Context, tx pgx.Tx, account, key string, hash []byte) 
 	return tag.RowsAffected() == 1, nil
 }
 
-// usedKey returns the entry the earlier request with this key created,
-// provided it was the same request.
-func usedKey(ctx context.Context, tx pgx.Tx, account, key string, hash []byte) (int64, error) {
+// usedKey returns what the earlier request with this key created, provided
+// it was the same request.
+func usedKey(ctx context.Context, tx pgx.Tx, account, key string, hash []byte) (entryID, holdID int64, err error) {
 	var (
-		stored []byte
-		entry  int64
+		stored      []byte
+		entry, hold *int64
 	)
-	err := tx.QueryRow(ctx, `
-		SELECT request_hash, entry_id
+	err = tx.QueryRow(ctx, `
+		SELECT request_hash, entry_id, hold_id
 		FROM idempotency_keys
 		WHERE account_id = $1 AND idempotency_key = $2`,
 		account, key,
-	).Scan(&stored, &entry)
+	).Scan(&stored, &entry, &hold)
 	if err != nil {
-		return 0, fmt.Errorf("load idempotency key %q: %w", key, err)
+		return 0, 0, fmt.Errorf("load idempotency key %q: %w", key, err)
 	}
 	if !bytes.Equal(stored, hash) {
-		return 0, fmt.Errorf("%w: %q", ErrIdempotencyConflict, key)
+		return 0, 0, fmt.Errorf("%w: %q", ErrIdempotencyConflict, key)
 	}
-	return entry, nil
+	if entry != nil {
+		entryID = *entry
+	}
+	if hold != nil {
+		holdID = *hold
+	}
+	return entryID, holdID, nil
 }

@@ -18,6 +18,7 @@ type posting struct {
 	account  string // the customer account the idempotency key belongs to
 	key      string
 	kind     Kind
+	holdID   int64
 	metadata map[string]string
 	lines    []Line
 }
@@ -60,7 +61,7 @@ func validateLines(lines []Line) error {
 // sorted and amounts normalized ("100" and "100.00" hash the same).
 func (p posting) hash() []byte {
 	var b strings.Builder
-	fmt.Fprintf(&b, "kind %q\n", p.kind)
+	fmt.Fprintf(&b, "kind %q\nhold %d\n", p.kind, p.holdID)
 	for _, k := range slices.Sorted(maps.Keys(p.metadata)) {
 		fmt.Fprintf(&b, "meta %q %q\n", k, p.metadata[k])
 	}
@@ -123,15 +124,15 @@ func startEntry(ctx context.Context, tx pgx.Tx, p posting) (*pendingEntry, Entry
 	pending := &pendingEntry{posting: p, accounts: accounts}
 	err = tx.QueryRow(ctx, `
 		WITH e AS (
-			INSERT INTO journal_entries (kind, metadata)
-			VALUES ($3, $4)
+			INSERT INTO journal_entries (kind, hold_id, metadata)
+			VALUES ($3, $4, $5)
 			RETURNING id, created_at
 		)
 		UPDATE idempotency_keys k SET entry_id = e.id
 		FROM e
 		WHERE k.account_id = $1 AND k.idempotency_key = $2
 		RETURNING e.id, e.created_at`,
-		p.account, p.key, p.kind, p.metadata,
+		p.account, p.key, p.kind, nullable(p.holdID), p.metadata,
 	).Scan(&pending.id, &pending.createdAt)
 	if err != nil {
 		return nil, Entry{}, fmt.Errorf("insert journal entry: %w", err)
@@ -140,9 +141,12 @@ func startEntry(ctx context.Context, tx pgx.Tx, p posting) (*pendingEntry, Entry
 }
 
 func replayEntry(ctx context.Context, tx pgx.Tx, account, key string, hash []byte) (Entry, error) {
-	entryID, err := usedKey(ctx, tx, account, key, hash)
+	entryID, _, err := usedKey(ctx, tx, account, key, hash)
 	if err != nil {
 		return Entry{}, err
+	}
+	if entryID == 0 {
+		return Entry{}, fmt.Errorf("%w: %q", ErrIdempotencyConflict, key)
 	}
 	return loadEntry(ctx, tx, entryID)
 }
@@ -151,11 +155,17 @@ func (p *pendingEntry) accountID(l Line) int64 {
 	return p.accounts[accountRef{account: l.AccountID, asset: l.Asset}]
 }
 
-// finish updates the balances and writes the journal lines.
-func (p *pendingEntry) finish(ctx context.Context, tx pgx.Tx) (Entry, error) {
-	changes := make(map[int64]decimal.Decimal, len(p.lines))
+// finish updates the balances, adding heldChanges (by ledger account id) to
+// the held amounts, and writes the journal lines.
+func (p *pendingEntry) finish(ctx context.Context, tx pgx.Tx, heldChanges map[int64]decimal.Decimal) (Entry, error) {
+	changes := make(map[int64]change, len(p.lines))
 	for _, l := range p.lines {
-		changes[p.accountID(l)] = l.Amount
+		changes[p.accountID(l)] = change{amount: l.Amount}
+	}
+	for id, held := range heldChanges {
+		c := changes[id]
+		c.held = held
+		changes[id] = c
 	}
 	versions, err := applyChanges(ctx, tx, changes)
 	if err != nil {
@@ -189,6 +199,7 @@ func (p *pendingEntry) finish(ctx context.Context, tx pgx.Tx) (Entry, error) {
 	return Entry{
 		ID:        p.id,
 		Kind:      p.kind,
+		HoldID:    p.holdID,
 		Metadata:  p.metadata,
 		Lines:     lines,
 		CreatedAt: p.createdAt,
@@ -197,13 +208,17 @@ func (p *pendingEntry) finish(ctx context.Context, tx pgx.Tx) (Entry, error) {
 
 func loadEntry(ctx context.Context, q Querier, id int64) (Entry, error) {
 	e := Entry{ID: id}
+	var holdID *int64
 	err := q.QueryRow(ctx, `
-		SELECT kind, metadata, created_at
+		SELECT kind, hold_id, metadata, created_at
 		FROM journal_entries
 		WHERE id = $1`, id,
-	).Scan(&e.Kind, &e.Metadata, &e.CreatedAt)
+	).Scan(&e.Kind, &holdID, &e.Metadata, &e.CreatedAt)
 	if err != nil {
 		return Entry{}, fmt.Errorf("load journal entry %d: %w", id, err)
+	}
+	if holdID != nil {
+		e.HoldID = *holdID
 	}
 
 	rows, err := q.Query(ctx, `
@@ -226,4 +241,11 @@ func scanLine(row pgx.CollectableRow) (Line, error) {
 	var l Line
 	err := row.Scan(&l.AccountID, &l.Asset, &l.Amount)
 	return l, err
+}
+
+func nullable(id int64) *int64 {
+	if id == 0 {
+		return nil
+	}
+	return &id
 }

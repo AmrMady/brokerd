@@ -30,7 +30,20 @@ type testLedger struct {
 }
 
 func newTestLedger(t *testing.T) testLedger {
-	return testLedger{ctx: t.Context(), pool: pgtest.NewPool(t)}
+	t.Helper()
+	l := testLedger{ctx: t.Context(), pool: pgtest.NewPool(t)}
+	for _, symbol := range []ledger.Asset{"AAPL", "MSFT"} {
+		if err := l.addAsset(symbol, 9); err != nil {
+			t.Fatalf("add asset %s: %v", symbol, err)
+		}
+	}
+	return l
+}
+
+func (l testLedger) addAsset(symbol ledger.Asset, scale int32) error {
+	return pgx.BeginFunc(l.ctx, l.pool, func(tx pgx.Tx) error {
+		return ledger.AddAsset(l.ctx, tx, symbol, scale)
+	})
 }
 
 func inTx[T any](l testLedger, fn func(pgx.Tx) (T, error)) (T, error) {
@@ -66,11 +79,38 @@ func (l testLedger) withdraw(key, owner, amount string) (ledger.Entry, error) {
 	})
 }
 
+func (l testLedger) placeHold(key, owner string, asset ledger.Asset, amount string) (ledger.Hold, error) {
+	return inTx(l, func(tx pgx.Tx) (ledger.Hold, error) {
+		return ledger.PlaceHold(l.ctx, tx, ledger.HoldRequest{IdempotencyKey: key, AccountID: owner, Asset: asset, Amount: dec(amount)})
+	})
+}
+
+func (l testLedger) releaseHold(id int64) (ledger.Hold, error) {
+	return inTx(l, func(tx pgx.Tx) (ledger.Hold, error) {
+		return ledger.ReleaseHold(l.ctx, tx, id)
+	})
+}
+
+func (l testLedger) settle(f ledger.Fill) (ledger.Entry, error) {
+	return inTx(l, func(tx pgx.Tx) (ledger.Entry, error) {
+		return ledger.SettleFill(l.ctx, tx, f)
+	})
+}
+
 func (l testLedger) mustDeposit(t *testing.T, key, owner, amount string) {
 	t.Helper()
 	if _, err := l.deposit(key, owner, amount); err != nil {
 		t.Fatalf("deposit %s to %s: %v", amount, owner, err)
 	}
+}
+
+func (l testLedger) mustHold(t *testing.T, key, owner string, asset ledger.Asset, amount string) ledger.Hold {
+	t.Helper()
+	h, err := l.placeHold(key, owner, asset, amount)
+	if err != nil {
+		t.Fatalf("hold %s %s for %s: %v", amount, asset, owner, err)
+	}
+	return h
 }
 
 func (l testLedger) balance(t *testing.T, owner string, asset ledger.Asset) ledger.Balance {

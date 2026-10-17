@@ -13,6 +13,7 @@ import (
 const (
 	CheckAssetTotal = "asset_total" // lines of each asset sum to zero
 	CheckBalance    = "balance"     // balance equals the sum of the account's lines
+	CheckHeld       = "held"        // held equals the sum of the account's active holds
 	CheckAvailable  = "available"   // customer accounts have no negative available balance
 )
 
@@ -54,14 +55,21 @@ var reconcileQueries = []struct {
 			SELECT ledger_account_id, SUM(amount) AS total FROM journal_lines GROUP BY ledger_account_id
 		) l ON l.ledger_account_id = la.id
 		WHERE la.balance <> COALESCE(l.total, 0)`},
+	{CheckHeld, `
+		SELECT la.account_id::text, la.asset, COALESCE(h.total, 0), la.held
+		FROM ledger_accounts la
+		LEFT JOIN (
+			SELECT ledger_account_id, SUM(amount) AS total FROM holds WHERE status = 'active' GROUP BY ledger_account_id
+		) h ON h.ledger_account_id = la.id
+		WHERE la.held <> COALESCE(h.total, 0)`},
 	{CheckAvailable, `
 		SELECT account_id::text, asset, 0::numeric, balance - held
 		FROM ledger_accounts
 		WHERE kind = 'customer' AND balance < held`},
 }
 
-// Reconcile recomputes balances from the journal and reports anything that
-// doesn't match. All checks read the same
+// Reconcile recomputes balances and held amounts from the journal and the
+// holds and reports anything that doesn't match. All checks read the same
 // snapshot, so concurrent writes can't cause false mismatches.
 func Reconcile(ctx context.Context, pool *pgxpool.Pool) (Report, error) {
 	var report Report

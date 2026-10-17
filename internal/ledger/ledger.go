@@ -21,6 +21,9 @@ var (
 	ErrUnbalanced          = errors.New("entry does not balance")
 	ErrInsufficientFunds   = errors.New("insufficient available balance")
 	ErrIdempotencyConflict = errors.New("idempotency key already used for a different request")
+	ErrHoldNotFound        = errors.New("hold not found")
+	ErrHoldClosed          = errors.New("hold is no longer active")
+	ErrHoldExceeded        = errors.New("fill exceeds its hold")
 	ErrAccountNotFound     = errors.New("account not found")
 )
 
@@ -37,6 +40,7 @@ type Kind string
 const (
 	KindDeposit    Kind = "deposit"
 	KindWithdrawal Kind = "withdrawal"
+	KindTradeFill  Kind = "trade_fill"
 )
 
 // Line adds Amount of Asset to an account. Negative amounts take it away.
@@ -50,6 +54,7 @@ type Line struct {
 type Entry struct {
 	ID        int64
 	Kind      Kind
+	HoldID    int64 // hold the entry settled, if any
 	Metadata  map[string]string
 	Lines     []Line
 	CreatedAt time.Time
@@ -110,7 +115,7 @@ func postEntry(ctx context.Context, tx pgx.Tx, p posting) (Entry, error) {
 	if err != nil || pending == nil {
 		return replayed, err
 	}
-	return pending.finish(ctx, tx)
+	return pending.finish(ctx, tx, nil)
 }
 
 func validateKey(key string) error {

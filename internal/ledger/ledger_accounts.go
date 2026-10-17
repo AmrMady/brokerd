@@ -147,6 +147,11 @@ func createAccounts(ctx context.Context, tx pgx.Tx, refs []accountRef) error {
 	return nil
 }
 
+type change struct {
+	amount decimal.Decimal
+	held   decimal.Decimal
+}
+
 type lockedAccount struct {
 	id      int64
 	ref     accountRef
@@ -162,15 +167,14 @@ func scanLockedAccount(row pgx.CollectableRow) (lockedAccount, error) {
 	return a, err
 }
 
-// applyChanges locks the ledger accounts, adds changes (by ledger account id)
-// to their balances, checks that no customer account ends up with a negative
-// available balance, and writes the new values. It returns the new version
-// of each ledger account.
-func applyChanges(ctx context.Context, tx pgx.Tx, changes map[int64]decimal.Decimal) (map[int64]int64, error) {
+// applyChanges locks the ledger accounts, checks that no customer account
+// ends up with a negative available balance, and writes the new values. It
+// returns the new version of each ledger account.
+func applyChanges(ctx context.Context, tx pgx.Tx, changes map[int64]change) (map[int64]int64, error) {
 	// Rows are locked in this order by every write, so writers can't
 	// deadlock. System accounts go last because every customer shares them.
-	// NO KEY UPDATE, because journal lines reference these rows and their
-	// foreign key checks take KEY SHARE locks, which FOR UPDATE blocks.
+	// NO KEY UPDATE, because holds and journal lines reference these rows and
+	// their foreign key checks take KEY SHARE locks, which FOR UPDATE blocks.
 	rows, err := tx.Query(ctx, `
 		SELECT id, account_id::text, asset, kind, balance, held, version
 		FROM ledger_accounts
@@ -192,25 +196,31 @@ func applyChanges(ctx context.Context, tx pgx.Tx, changes map[int64]decimal.Deci
 	var (
 		ids      = make([]int64, len(locked))
 		balances = make([]decimal.Decimal, len(locked))
+		helds    = make([]decimal.Decimal, len(locked))
 		versions = make([]int64, len(locked))
 		next     = make(map[int64]int64, len(locked))
 	)
 	for i, a := range locked {
-		balance := a.balance.Add(changes[a.id])
-		if a.kind != "system" && balance.LessThan(a.held) {
-			return nil, fmt.Errorf("%w: %s would have %s available", ErrInsufficientFunds, a.ref, balance.Sub(a.held))
+		c := changes[a.id]
+		balance := a.balance.Add(c.amount)
+		held := a.held.Add(c.held)
+		if held.IsNegative() {
+			return nil, fmt.Errorf("%s: held amount would drop to %s", a.ref, held)
 		}
-		ids[i], balances[i], versions[i] = a.id, balance, a.version+1
+		if a.kind != "system" && balance.LessThan(held) {
+			return nil, fmt.Errorf("%w: %s would have %s available", ErrInsufficientFunds, a.ref, balance.Sub(held))
+		}
+		ids[i], balances[i], helds[i], versions[i] = a.id, balance, held, a.version+1
 		next[a.id] = a.version + 1
 	}
 
 	_, err = tx.Exec(ctx, `
 		UPDATE ledger_accounts AS la
-		SET balance = u.balance, version = u.version, updated_at = now()
-		FROM unnest($1::bigint[], $2::numeric[], $3::bigint[])
-		     AS u(id, balance, version)
+		SET balance = u.balance, held = u.held, version = u.version, updated_at = now()
+		FROM unnest($1::bigint[], $2::numeric[], $3::numeric[], $4::bigint[])
+		     AS u(id, balance, held, version)
 		WHERE la.id = u.id`,
-		ids, balances, versions)
+		ids, balances, helds, versions)
 	if err != nil {
 		return nil, fmt.Errorf("update ledger accounts: %w", err)
 	}

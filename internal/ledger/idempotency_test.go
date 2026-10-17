@@ -46,6 +46,57 @@ func TestConcurrentDuplicateDeposit(t *testing.T) {
 	l.requireReconciled(t)
 }
 
+func TestConcurrentDuplicateHold(t *testing.T) {
+	t.Parallel()
+	l := newTestLedger(t)
+	alice := l.openAccount(t)
+	l.mustDeposit(t, "d1", alice, "100")
+
+	ids := make([]int64, 50)
+	runConcurrently(len(ids), func(i int) {
+		h, err := l.placeHold("hold-1", alice, ledger.USD, "60")
+		if err != nil {
+			t.Errorf("hold %d: %v", i, err)
+			return
+		}
+		ids[i] = h.ID
+	})
+
+	requireSameIDs(t, ids)
+	l.wantBalance(t, alice, ledger.USD, "100", "60")
+	l.requireReconciled(t)
+}
+
+func TestConcurrentDuplicateFill(t *testing.T) {
+	t.Parallel()
+	l := newTestLedger(t)
+	alice := l.openAccount(t)
+	l.mustDeposit(t, "d1", alice, "1000")
+	h := l.mustHold(t, "h1", alice, ledger.USD, "505")
+	fill := ledger.Fill{
+		ID: "fill-1", HoldID: h.ID, AccountID: alice, Symbol: "AAPL", Side: ledger.Buy,
+		Quantity: dec("10"), Price: dec("50"), Fee: dec("5"),
+	}
+
+	ids := make([]int64, 50)
+	runConcurrently(len(ids), func(i int) {
+		e, err := l.settle(fill)
+		if err != nil {
+			t.Errorf("settle %d: %v", i, err)
+			return
+		}
+		ids[i] = e.ID
+	})
+
+	requireSameIDs(t, ids)
+	if n := l.countEntries(t, ledger.KindTradeFill); n != 1 {
+		t.Errorf("%d fill entries, want 1", n)
+	}
+	l.wantBalance(t, alice, ledger.USD, "495", "0")
+	l.wantBalance(t, alice, "AAPL", "10", "0")
+	l.requireReconciled(t)
+}
+
 func TestIdempotencyKeyReusedForDifferentRequest(t *testing.T) {
 	t.Parallel()
 	l := newTestLedger(t)
@@ -67,7 +118,22 @@ func TestIdempotencyKeyReusedForDifferentRequest(t *testing.T) {
 	_, err = l.withdraw("k1", alice, "100")
 	wantErr(t, err, ledger.ErrIdempotencyConflict)
 
-	l.wantBalance(t, alice, ledger.USD, "100", "0")
+	h, err := l.placeHold("k2", alice, ledger.USD, "10")
+	noErr(t, err)
+	_, err = l.placeHold("k2", alice, ledger.USD, "11")
+	wantErr(t, err, ledger.ErrIdempotencyConflict)
+
+	fill := ledger.Fill{
+		ID: "k3", HoldID: h.ID, AccountID: alice, Symbol: "AAPL", Side: ledger.Buy,
+		Quantity: dec("1"), Price: dec("9"), Fee: dec("1"),
+	}
+	_, err = l.settle(fill)
+	noErr(t, err)
+	fill.Price = dec("8")
+	_, err = l.settle(fill)
+	wantErr(t, err, ledger.ErrIdempotencyConflict)
+
+	l.wantBalance(t, alice, ledger.USD, "90", "0")
 	l.requireReconciled(t)
 }
 
@@ -84,5 +150,26 @@ func TestFailedRequestCanBeRetried(t *testing.T) {
 	noErr(t, err)
 
 	l.wantBalance(t, alice, ledger.USD, "50", "0")
+	l.requireReconciled(t)
+}
+
+func TestRetriedHoldIsNotPlacedAgain(t *testing.T) {
+	t.Parallel()
+	l := newTestLedger(t)
+	alice := l.openAccount(t)
+	_, err := l.deposit("d1", alice, "100")
+	noErr(t, err)
+
+	h, err := l.placeHold("h1", alice, ledger.USD, "60")
+	noErr(t, err)
+	_, err = l.releaseHold(h.ID)
+	noErr(t, err)
+
+	retried, err := l.placeHold("h1", alice, ledger.USD, "60")
+	noErr(t, err)
+	if retried.ID != h.ID || retried.Status != ledger.HoldReleased {
+		t.Errorf("retried hold = %+v, want hold %d, released", retried, h.ID)
+	}
+	l.wantBalance(t, alice, ledger.USD, "100", "0")
 	l.requireReconciled(t)
 }

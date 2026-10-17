@@ -42,6 +42,13 @@ func (a Asset) validate() error {
 	return nil
 }
 
+func validateSymbol(symbol Asset) error {
+	if symbol == USD {
+		return fmt.Errorf("%w: USD is not a symbol", ErrInvalid)
+	}
+	return symbol.validate()
+}
+
 // checkDecimal rejects extra decimal places rather than rounding them away.
 func checkDecimal(name string, d decimal.Decimal, places int32) error {
 	if !d.Equal(d.Truncate(places)) {
