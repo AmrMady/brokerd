@@ -20,6 +20,7 @@ var (
 	ErrInvalid             = errors.New("invalid ledger request")
 	ErrUnbalanced          = errors.New("entry does not balance")
 	ErrInsufficientFunds   = errors.New("insufficient available balance")
+	ErrUnsettledFunds      = errors.New("funds are not settled yet")
 	ErrIdempotencyConflict = errors.New("idempotency key already used for a different request")
 	ErrHoldNotFound        = errors.New("hold not found")
 	ErrHoldClosed          = errors.New("hold is no longer active")

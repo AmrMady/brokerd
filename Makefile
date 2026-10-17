@@ -1,7 +1,7 @@
 DATABASE_URL ?= postgres://brokerd:brokerd@localhost:5432/brokerd?sslmode=disable
 export DATABASE_URL
 
-.PHONY: build test test-short bench lint db-up db-down migrate reconcile
+.PHONY: build test test-short bench lint db-up db-down migrate reconcile settle
 
 build:
 	go build ./...
@@ -29,3 +29,6 @@ migrate:
 
 reconcile:
 	go run ./cmd/brokerd reconcile
+
+settle:
+	go run ./cmd/brokerd settle

@@ -43,7 +43,7 @@ type modelKey struct {
 }
 
 type modelBalance struct {
-	balance, held decimal.Decimal
+	balance, held, unsettled decimal.Decimal
 }
 
 func (m *modelBalance) available() decimal.Decimal {
@@ -76,13 +76,15 @@ func (s *simulation) randomOperation() {
 		s.deposit()
 	case n < 35:
 		s.withdraw()
-	case n < 50:
+	case n < 48:
 		s.holdCash()
-	case n < 60:
+	case n < 58:
 		s.holdShares()
-	case n < 70:
+	case n < 66:
 		s.release()
-	case n < 90:
+	case n < 69:
+		s.settleDue()
+	case n < 89:
 		s.settle()
 	case n < 97:
 		s.replay()
@@ -167,8 +169,11 @@ func (s *simulation) withdraw() {
 	op := fmt.Sprintf("withdraw %s from %s", amount, owner)
 	cash := s.account(owner, ledger.USD)
 	var want error
-	if cash.available().LessThan(amount) {
+	switch left := cash.available().Sub(amount); {
+	case left.IsNegative():
 		want = ledger.ErrInsufficientFunds
+	case left.LessThan(cash.unsettled):
+		want = ledger.ErrUnsettledFunds
 	}
 	e, err := s.l.withdraw(key, owner, amount.String())
 	if !s.expect(op, err, want) {
@@ -299,6 +304,9 @@ func (s *simulation) settle() {
 		shares.balance = shares.balance.Sub(f.Quantity)
 		shares.held = shares.held.Sub(need)
 		cash.balance = cash.balance.Add(notional).Sub(f.Fee)
+		if proceeds := notional.Sub(f.Fee); proceeds.IsPositive() {
+			cash.unsettled = cash.unsettled.Add(proceeds)
+		}
 	}
 	// A fill that uses up the hold settles it; otherwise more fills can follow.
 	if s.holds[i].Remaining = h.Remaining.Sub(need); s.holds[i].Remaining.IsZero() {
@@ -343,15 +351,31 @@ func (s *simulation) reuseKey() {
 	s.expect("reuse the key of "+r.name, r.conflict(), ledger.ErrIdempotencyConflict)
 }
 
+// settleDue settles every trade; in this test they all settle on settleDate.
+func (s *simulation) settleDue() {
+	for {
+		n, err := s.l.settleDue(settleDate)
+		if !s.expect("settle due trades", err, nil) {
+			return
+		}
+		if n == 0 {
+			break
+		}
+	}
+	for _, m := range s.model {
+		m.unsettled = decimal.Zero
+	}
+}
+
 func (s *simulation) compareBalances() {
 	s.t.Helper()
 	for _, owner := range s.owners {
 		for _, asset := range append([]ledger.Asset{ledger.USD}, simSymbols...) {
 			got := s.l.balance(s.t, owner, asset)
 			want := s.account(owner, asset)
-			if !got.Balance.Equal(want.balance) || !got.Held.Equal(want.held) {
-				s.t.Errorf("%s/%s: balance %s held %s, model says balance %s held %s",
-					owner, asset, got.Balance, got.Held, want.balance, want.held)
+			if !got.Balance.Equal(want.balance) || !got.Held.Equal(want.held) || !got.Unsettled.Equal(want.unsettled) {
+				s.t.Errorf("%s/%s: balance %s held %s unsettled %s, model says balance %s held %s unsettled %s",
+					owner, asset, got.Balance, got.Held, got.Unsettled, want.balance, want.held, want.unsettled)
 			}
 		}
 	}

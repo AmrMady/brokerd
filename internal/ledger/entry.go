@@ -169,16 +169,16 @@ func (p *pendingEntry) accountID(l Line) int64 {
 	return p.accounts[accountRef{account: l.AccountID, asset: l.Asset}]
 }
 
-// finish updates the balances, adding heldChanges (by ledger account id) to
-// the held amounts, and writes the journal lines.
-func (p *pendingEntry) finish(ctx context.Context, tx pgx.Tx, heldChanges map[int64]decimal.Decimal) (Entry, error) {
+// finish updates the balances with the entry's lines plus extra held and
+// unsettled changes (by ledger account id), and writes the journal lines.
+func (p *pendingEntry) finish(ctx context.Context, tx pgx.Tx, extra map[int64]change) (Entry, error) {
 	changes := make(map[int64]change, len(p.lines))
 	for _, l := range p.lines {
 		changes[p.accountID(l)] = change{amount: l.Amount}
 	}
-	for id, held := range heldChanges {
+	for id, e := range extra {
 		c := changes[id]
-		c.held = held
+		c.held, c.unsettled = e.held, e.unsettled
 		changes[id] = c
 	}
 	versions, err := applyChanges(ctx, tx, changes)

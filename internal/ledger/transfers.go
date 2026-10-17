@@ -126,7 +126,8 @@ func requestTransfer(ctx context.Context, tx pgx.Tx, c CashTransfer, d Direction
 		err = requireStatus(c.AccountID, status, AccountActive, AccountRestricted)
 	} else {
 		if err = requireStatus(c.AccountID, status, AccountActive); err == nil {
-			holdID, _, err = reserve(ctx, tx, ids[cash], c.Amount)
+			// A withdrawal can only use settled cash.
+			holdID, _, err = reserve(ctx, tx, ids[cash], change{held: c.Amount, settledOnly: true})
 		}
 	}
 	if err != nil {
@@ -192,13 +193,13 @@ func CompleteTransfer(ctx context.Context, tx pgx.Tx, id int64) (Transfer, error
 	if err = pending.insert(ctx, tx); err != nil {
 		return Transfer{}, err
 	}
-	var held map[int64]decimal.Decimal
+	var held map[int64]change
 	if t.Direction == DirectionWithdrawal {
 		cash := pending.accounts[accountRef{account: t.AccountID, asset: USD}]
 		if err = consumeHold(ctx, tx, t.holdID, cash, t.Amount); err != nil {
 			return Transfer{}, err
 		}
-		held = map[int64]decimal.Decimal{cash: t.Amount.Neg()}
+		held = map[int64]change{cash: {held: t.Amount.Neg()}}
 	}
 	if _, err = pending.finish(ctx, tx, held); err != nil {
 		return Transfer{}, err

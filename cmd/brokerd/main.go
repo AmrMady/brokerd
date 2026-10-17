@@ -2,8 +2,10 @@
 //
 // Usage:
 //
-//	brokerd migrate     apply database migrations
-//	brokerd reconcile   check the ledger, exit 1 on any mismatch
+//	brokerd migrate             apply database migrations
+//	brokerd reconcile           check the ledger, exit 1 on any mismatch
+//	brokerd settle [YYYY-MM-DD] settle trades due on or before the date
+//	                            (default: today in New York)
 //
 // DATABASE_URL must be set.
 package main
@@ -15,15 +17,21 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
+	_ "time/tzdata" // settlement dates are New York dates, wherever this runs
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AmrMady/brokerd/internal/ledger"
 	"github.com/AmrMady/brokerd/internal/postgres"
 )
 
-const usage = "usage: brokerd migrate | reconcile"
+const usage = "usage: brokerd migrate | reconcile | settle [YYYY-MM-DD]"
+
+const settleBatchSize = 500
 
 type config struct {
 	DatabaseURL string
@@ -49,17 +57,25 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, logger *slog.Logger) error {
-	if len(args) != 1 {
+	if len(args) == 0 {
 		return errors.New(usage)
 	}
 	var command func(context.Context, *pgxpool.Pool, *slog.Logger) error
-	switch args[0] {
-	case "migrate":
+	switch {
+	case args[0] == "migrate" && len(args) == 1:
 		command = migrate
-	case "reconcile":
+	case args[0] == "reconcile" && len(args) == 1:
 		command = reconcile
+	case args[0] == "settle" && len(args) <= 2:
+		asOf, err := settlementDate(args[1:])
+		if err != nil {
+			return err
+		}
+		command = func(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {
+			return settle(ctx, pool, logger, asOf)
+		}
 	default:
-		return fmt.Errorf("unknown command %q; %s", args[0], usage)
+		return fmt.Errorf("unknown command %q; %s", strings.Join(args, " "), usage)
 	}
 
 	cfg, err := loadConfig()
@@ -96,4 +112,48 @@ func reconcile(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) err
 	}
 	logger.Info("ledger reconciled", "ledger_accounts", report.LedgerAccounts, "lines", report.Lines)
 	return nil
+}
+
+func settlementDate(args []string) (time.Time, error) {
+	if len(args) == 1 {
+		d, err := time.Parse(time.DateOnly, args[0])
+		if err != nil {
+			return time.Time{}, fmt.Errorf("settlement date: %w", err)
+		}
+		return d, nil
+	}
+	newYork, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Now().In(newYork), nil
+}
+
+// settle runs SettleDue in batches, each in its own transaction, until
+// nothing due is left.
+func settle(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, asOf time.Time) error {
+	total := 0
+	for {
+		n, err := settleBatch(ctx, pool, asOf)
+		if err != nil {
+			return err
+		}
+		total += n
+		if n < settleBatchSize {
+			break
+		}
+	}
+	logger.Info("trades settled", "as_of", asOf.Format(time.DateOnly), "settled", total)
+	return nil
+}
+
+func settleBatch(ctx context.Context, pool *pgxpool.Pool, asOf time.Time) (int, error) {
+	var n int
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) (txErr error) {
+		n, txErr = ledger.SettleDue(ctx, tx, asOf, settleBatchSize)
+		return txErr
+	}); err != nil {
+		return 0, err
+	}
+	return n, nil
 }

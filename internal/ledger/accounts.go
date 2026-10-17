@@ -118,7 +118,7 @@ func CloseAccount(ctx context.Context, tx pgx.Tx, id, reason string) (Account, e
 	err = tx.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM ledger_accounts
-			WHERE account_id = $1 AND (balance <> 0 OR held <> 0)
+			WHERE account_id = $1 AND (balance <> 0 OR held <> 0 OR unsettled <> 0)
 		) OR EXISTS (
 			SELECT 1 FROM transfers
 			WHERE account_id = $1 AND status = 'pending'

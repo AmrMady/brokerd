@@ -10,9 +10,9 @@ Done:
 
 - Ledger: brokerage accounts holding USD cash and fractional share positions
   in Postgres. Deposits and withdrawals that go through a bank transfer
-  lifecycle, holds for open orders, settlement of trade fills (including
-  partial fills) with fees, reversals, balances, account history and a
-  reconcile command.
+  lifecycle, holds for open orders, trade fills (including partial fills)
+  with fees, T+1 settlement of sale proceeds, reversals, balances, account
+  history and a reconcile command.
 
 Planned:
 
@@ -21,7 +21,7 @@ Planned:
 - Paper trading: market and limit orders filled against live quotes
 - REST API, metrics, OpenAPI spec
 - Transactional outbox to Kafka
-- Later: order book and matching engine, risk checks, T+1 settlement
+- Later: order book and matching engine, risk checks, corporate actions
 
 ## Ledger
 
@@ -69,6 +69,11 @@ Some notes on how it works:
 - Transfer requests, holds and fills take an idempotency key, scoped to
   the account. Retrying a request returns the original result; reusing a key
   for a different request is an error.
+- Fills are booked on the trade date. A sell's proceeds can be traded with
+  right away but stay unsettled, and can't be withdrawn, until their
+  settlement date. `brokerd settle` settles everything due; each settlement is
+  a compare-and-set on its status, so runs can repeat or overlap safely. The
+  settlement date comes with the fill from whoever executed the trade.
 - Mistakes are corrected with a reversal, never an edit. An entry can only be
   reversed once (`reverses_entry_id` is unique), and a trigger checks at
   commit that the reversal mirrors it exactly. Only trade fills are reversed
@@ -87,6 +92,7 @@ Some notes on how it works:
 make db-up      # Postgres in Docker
 make migrate
 make reconcile
+make settle     # settle trades due today
 ```
 
 ## Tests

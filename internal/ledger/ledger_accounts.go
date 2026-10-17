@@ -11,14 +11,18 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// Balance is the current state of one asset in an account.
+// Balance is the current state of one asset in an account. Available is
+// what can be traded with. Unsettled is sale proceeds still waiting for
+// settlement; they can be traded with but not withdrawn.
 type Balance struct {
-	AccountID string
-	Asset     Asset
-	Balance   decimal.Decimal
-	Held      decimal.Decimal
-	Available decimal.Decimal
-	Version   int64
+	AccountID    string
+	Asset        Asset
+	Balance      decimal.Decimal
+	Held         decimal.Decimal
+	Unsettled    decimal.Decimal
+	Available    decimal.Decimal
+	Withdrawable decimal.Decimal
+	Version      int64
 }
 
 // Balances returns the balances of an account, ordered by asset.
@@ -27,7 +31,7 @@ func Balances(ctx context.Context, q Querier, accountID string) ([]Balance, erro
 		return nil, err
 	}
 	rows, err := q.Query(ctx, `
-		SELECT account_id::text, asset, balance, held, version
+		SELECT account_id::text, asset, balance, held, unsettled, version
 		FROM ledger_accounts
 		WHERE account_id = $1
 		ORDER BY asset`, accountID)
@@ -43,8 +47,9 @@ func Balances(ctx context.Context, q Querier, accountID string) ([]Balance, erro
 
 func scanBalance(row pgx.CollectableRow) (Balance, error) {
 	var b Balance
-	err := row.Scan(&b.AccountID, &b.Asset, &b.Balance, &b.Held, &b.Version)
+	err := row.Scan(&b.AccountID, &b.Asset, &b.Balance, &b.Held, &b.Unsettled, &b.Version)
 	b.Available = b.Balance.Sub(b.Held)
+	b.Withdrawable = decimal.Max(b.Available.Sub(b.Unsettled), decimal.Zero)
 	return b, err
 }
 
@@ -148,35 +153,41 @@ func createAccounts(ctx context.Context, tx pgx.Tx, refs []accountRef) error {
 }
 
 type change struct {
-	amount decimal.Decimal
-	held   decimal.Decimal
+	amount    decimal.Decimal
+	held      decimal.Decimal
+	unsettled decimal.Decimal
+	// settledOnly means the change may only use settled cash, as a
+	// withdrawal must.
+	settledOnly bool
 }
 
 type lockedAccount struct {
-	id      int64
-	ref     accountRef
-	kind    string
-	balance decimal.Decimal
-	held    decimal.Decimal
-	version int64
+	id        int64
+	ref       accountRef
+	kind      string
+	balance   decimal.Decimal
+	held      decimal.Decimal
+	unsettled decimal.Decimal
+	version   int64
 }
 
 func scanLockedAccount(row pgx.CollectableRow) (lockedAccount, error) {
 	var a lockedAccount
-	err := row.Scan(&a.id, &a.ref.account, &a.ref.asset, &a.kind, &a.balance, &a.held, &a.version)
+	err := row.Scan(&a.id, &a.ref.account, &a.ref.asset, &a.kind, &a.balance, &a.held, &a.unsettled, &a.version)
 	return a, err
 }
 
 // applyChanges locks the ledger accounts, checks that no customer account
-// ends up with a negative available balance, and writes the new values. It
-// returns the new version of each ledger account.
+// ends up with a negative available balance (or, for settledOnly changes, a
+// negative withdrawable one), and writes the new values. It returns the new
+// version of each ledger account.
 func applyChanges(ctx context.Context, tx pgx.Tx, changes map[int64]change) (map[int64]int64, error) {
 	// Rows are locked in this order by every write, so writers can't
 	// deadlock. System accounts go last because every customer shares them.
 	// NO KEY UPDATE, because holds and journal lines reference these rows and
 	// their foreign key checks take KEY SHARE locks, which FOR UPDATE blocks.
 	rows, err := tx.Query(ctx, `
-		SELECT id, account_id::text, asset, kind, balance, held, version
+		SELECT id, account_id::text, asset, kind, balance, held, unsettled, version
 		FROM ledger_accounts
 		WHERE id = ANY($1)
 		ORDER BY kind, id
@@ -194,33 +205,39 @@ func applyChanges(ctx context.Context, tx pgx.Tx, changes map[int64]change) (map
 	}
 
 	var (
-		ids      = make([]int64, len(locked))
-		balances = make([]decimal.Decimal, len(locked))
-		helds    = make([]decimal.Decimal, len(locked))
-		versions = make([]int64, len(locked))
-		next     = make(map[int64]int64, len(locked))
+		ids        = make([]int64, len(locked))
+		balances   = make([]decimal.Decimal, len(locked))
+		helds      = make([]decimal.Decimal, len(locked))
+		unsettleds = make([]decimal.Decimal, len(locked))
+		versions   = make([]int64, len(locked))
+		next       = make(map[int64]int64, len(locked))
 	)
 	for i, a := range locked {
 		c := changes[a.id]
 		balance := a.balance.Add(c.amount)
 		held := a.held.Add(c.held)
-		if held.IsNegative() {
-			return nil, fmt.Errorf("%s: held amount would drop to %s", a.ref, held)
+		unsettled := a.unsettled.Add(c.unsettled)
+		if held.IsNegative() || unsettled.IsNegative() {
+			return nil, fmt.Errorf("%s: held %s and unsettled %s can't be negative", a.ref, held, unsettled)
 		}
-		if a.kind != "system" && balance.LessThan(held) {
-			return nil, fmt.Errorf("%w: %s would have %s available", ErrInsufficientFunds, a.ref, balance.Sub(held))
+		available := balance.Sub(held)
+		if a.kind != "system" && available.IsNegative() {
+			return nil, fmt.Errorf("%w: %s would have %s available", ErrInsufficientFunds, a.ref, available)
 		}
-		ids[i], balances[i], helds[i], versions[i] = a.id, balance, held, a.version+1
+		if c.settledOnly && available.LessThan(unsettled) {
+			return nil, fmt.Errorf("%w: %s has %s unsettled", ErrUnsettledFunds, a.ref, unsettled)
+		}
+		ids[i], balances[i], helds[i], unsettleds[i], versions[i] = a.id, balance, held, unsettled, a.version+1
 		next[a.id] = a.version + 1
 	}
 
 	_, err = tx.Exec(ctx, `
 		UPDATE ledger_accounts AS la
-		SET balance = u.balance, held = u.held, version = u.version, updated_at = now()
-		FROM unnest($1::bigint[], $2::numeric[], $3::numeric[], $4::bigint[])
-		     AS u(id, balance, held, version)
+		SET balance = u.balance, held = u.held, unsettled = u.unsettled, version = u.version, updated_at = now()
+		FROM unnest($1::bigint[], $2::numeric[], $3::numeric[], $4::numeric[], $5::bigint[])
+		     AS u(id, balance, held, unsettled, version)
 		WHERE la.id = u.id`,
-		ids, balances, helds, versions)
+		ids, balances, helds, unsettleds, versions)
 	if err != nil {
 		return nil, fmt.Errorf("update ledger accounts: %w", err)
 	}

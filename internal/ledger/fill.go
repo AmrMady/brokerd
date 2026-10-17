@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
@@ -18,16 +19,20 @@ const (
 	Sell Side = "sell"
 )
 
-// Fill is an executed trade to be settled against the hold of its order.
+// Fill is an executed trade to be booked against the hold of its order.
+// TradeDate and SettleDate come from whoever executed the trade; only their
+// dates are used.
 type Fill struct {
-	ID        string // also the idempotency key
-	HoldID    int64
-	AccountID string
-	Symbol    Asset
-	Side      Side
-	Quantity  decimal.Decimal
-	Price     decimal.Decimal
-	Fee       decimal.Decimal // USD
+	ID         string // also the idempotency key
+	HoldID     int64
+	AccountID  string
+	Symbol     Asset
+	Side       Side
+	Quantity   decimal.Decimal
+	Price      decimal.Decimal
+	Fee        decimal.Decimal // USD
+	TradeDate  time.Time
+	SettleDate time.Time
 }
 
 // Notional returns quantity * price, rounded half-to-even to the cent.
@@ -66,7 +71,23 @@ func (f Fill) validate() error {
 	if f.Notional().IsZero() {
 		return fmt.Errorf("%w: %s shares at %s is worth less than half a cent", ErrInvalid, f.Quantity, f.Price)
 	}
+	if f.TradeDate.IsZero() || f.SettleDate.IsZero() {
+		return fmt.Errorf("%w: trade and settlement dates are required", ErrInvalid)
+	}
+	if dateOnly(f.SettleDate).Before(dateOnly(f.TradeDate)) {
+		return fmt.Errorf("%w: settlement date %s is before trade date %s",
+			ErrInvalid, f.SettleDate.Format(time.DateOnly), f.TradeDate.Format(time.DateOnly))
+	}
 	return nil
+}
+
+// proceeds is the cash a sell adds to the account, which stays unsettled
+// until the settlement date.
+func (f Fill) proceeds() decimal.Decimal {
+	if f.Side == Buy {
+		return decimal.Zero
+	}
+	return decimal.Max(f.Notional().Sub(f.Fee), decimal.Zero)
 }
 
 func (f Fill) lines() []Line {
@@ -106,21 +127,27 @@ func (f Fill) holdNeeds() (accountRef, decimal.Decimal) {
 
 func (f Fill) metadata() map[string]string {
 	return map[string]string{
-		"fill_id":  f.ID,
-		"side":     string(f.Side),
-		"symbol":   string(f.Symbol),
-		"quantity": f.Quantity.String(),
-		"price":    f.Price.String(),
-		"fee":      f.Fee.String(),
-		"notional": f.Notional().String(),
+		"fill_id":     f.ID,
+		"side":        string(f.Side),
+		"symbol":      string(f.Symbol),
+		"quantity":    f.Quantity.String(),
+		"price":       f.Price.String(),
+		"fee":         f.Fee.String(),
+		"notional":    f.Notional().String(),
+		"trade_date":  dateOnly(f.TradeDate).Format(time.DateOnly),
+		"settle_date": dateOnly(f.SettleDate).Format(time.DateOnly),
 	}
 }
 
 // SettleFill posts f and takes what it costs out of its hold. An order can
 // fill in several parts, so the hold stays active until fills use all of it
 // or ReleaseHold returns the rest. A fill that needs more than what's left of
-// the hold fails with ErrHoldExceeded. Settling the same fill twice returns
+// the hold fails with ErrHoldExceeded. Booking the same fill twice returns
 // the original entry.
+//
+// Positions change on the trade date. A sell's proceeds can be traded with
+// right away but stay unsettled, and can't be withdrawn, until SettleDue
+// settles them.
 func SettleFill(ctx context.Context, tx pgx.Tx, f Fill) (Entry, error) {
 	if err := f.validate(); err != nil {
 		return Entry{}, err
@@ -129,6 +156,11 @@ func SettleFill(ctx context.Context, tx pgx.Tx, f Fill) (Entry, error) {
 		return Entry{}, err
 	}
 	status, err := lockAccount(ctx, tx, f.AccountID)
+	if err != nil {
+		return Entry{}, err
+	}
+	cashRef := accountRef{account: f.AccountID, asset: USD}
+	cash, err := resolveAccounts(ctx, tx, []accountRef{cashRef})
 	if err != nil {
 		return Entry{}, err
 	}
@@ -152,5 +184,24 @@ func SettleFill(ctx context.Context, tx pgx.Tx, f Fill) (Entry, error) {
 	if err = consumeHold(ctx, tx, f.HoldID, held, need); err != nil {
 		return Entry{}, err
 	}
-	return pending.finish(ctx, tx, map[int64]decimal.Decimal{held: need.Neg()})
+	_, err = tx.Exec(ctx, `
+		INSERT INTO settlements (entry_id, ledger_account_id, unsettled_cash, trade_date, settle_date)
+		VALUES ($1, $2, $3, $4, $5)`,
+		pending.id, cash[cashRef], f.proceeds(), dateOnly(f.TradeDate), dateOnly(f.SettleDate))
+	if err != nil {
+		return Entry{}, fmt.Errorf("insert settlement: %w", err)
+	}
+
+	extra := map[int64]change{held: {held: need.Neg()}}
+	if p := f.proceeds(); p.IsPositive() {
+		c := extra[cash[cashRef]]
+		c.unsettled = p
+		extra[cash[cashRef]] = c
+	}
+	return pending.finish(ctx, tx, extra)
+}
+
+func dateOnly(t time.Time) time.Time {
+	y, m, d := t.Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
 }

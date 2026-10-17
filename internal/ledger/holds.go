@@ -96,7 +96,7 @@ func PlaceHold(ctx context.Context, tx pgx.Tx, r HoldRequest) (Hold, error) {
 	}
 
 	h := Hold{AccountID: r.AccountID, Asset: r.Asset, Amount: r.Amount, Remaining: r.Amount, Status: HoldActive}
-	if h.ID, h.CreatedAt, err = reserve(ctx, tx, ids[ref], r.Amount); err != nil {
+	if h.ID, h.CreatedAt, err = reserve(ctx, tx, ids[ref], change{held: r.Amount}); err != nil {
 		return Hold{}, err
 	}
 	if err = recordKey(ctx, tx, r.AccountID, r.IdempotencyKey, keyResult{holdID: h.ID}); err != nil {
@@ -105,18 +105,19 @@ func PlaceHold(ctx context.Context, tx pgx.Tx, r HoldRequest) (Hold, error) {
 	return h, nil
 }
 
-// reserve inserts a hold on a ledger account and adds it to the held amount.
-func reserve(ctx context.Context, tx pgx.Tx, ledgerAccountID int64, amount decimal.Decimal) (id int64, createdAt time.Time, err error) {
+// reserve inserts a hold of c.held on a ledger account and adds it to the
+// held amount.
+func reserve(ctx context.Context, tx pgx.Tx, ledgerAccountID int64, c change) (id int64, createdAt time.Time, err error) {
 	err = tx.QueryRow(ctx, `
 		INSERT INTO holds (ledger_account_id, amount, remaining)
 		VALUES ($1, $2, $2)
 		RETURNING id, created_at`,
-		ledgerAccountID, amount,
+		ledgerAccountID, c.held,
 	).Scan(&id, &createdAt)
 	if err != nil {
 		return 0, time.Time{}, fmt.Errorf("insert hold: %w", err)
 	}
-	if _, err = applyChanges(ctx, tx, map[int64]change{ledgerAccountID: {held: amount}}); err != nil {
+	if _, err = applyChanges(ctx, tx, map[int64]change{ledgerAccountID: c}); err != nil {
 		return 0, time.Time{}, err
 	}
 	return id, createdAt, nil

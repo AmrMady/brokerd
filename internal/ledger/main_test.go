@@ -6,6 +6,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -101,9 +102,25 @@ func (l testLedger) releaseHold(id int64) (ledger.Hold, error) {
 	})
 }
 
+// Fills in tests that aren't about settlement trade on a Friday and settle
+// the following Monday.
+var (
+	tradeDate  = time.Date(2026, 10, 16, 0, 0, 0, 0, time.UTC)
+	settleDate = time.Date(2026, 10, 19, 0, 0, 0, 0, time.UTC)
+)
+
 func (l testLedger) settle(f ledger.Fill) (ledger.Entry, error) {
+	if f.TradeDate.IsZero() {
+		f.TradeDate, f.SettleDate = tradeDate, settleDate
+	}
 	return inTx(l, func(tx pgx.Tx) (ledger.Entry, error) {
 		return ledger.SettleFill(l.ctx, tx, f)
+	})
+}
+
+func (l testLedger) settleDue(asOf time.Time) (int, error) {
+	return inTx(l, func(tx pgx.Tx) (int, error) {
+		return ledger.SettleDue(l.ctx, tx, asOf, 100)
 	})
 }
 

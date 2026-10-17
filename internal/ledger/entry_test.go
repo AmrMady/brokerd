@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/shopspring/decimal"
 )
@@ -165,6 +166,7 @@ func TestFillValidate(t *testing.T) {
 	valid := Fill{
 		ID: "fill-1", HoldID: 1, AccountID: "3f6c1a52-8d4e-4b7a-9c21-5e0d7f8a9b10", Symbol: "AAPL", Side: Buy,
 		Quantity: d("1.5"), Price: d("100.25"), Fee: d("1.00"),
+		TradeDate: time.Date(2026, 10, 16, 15, 30, 0, 0, time.UTC), SettleDate: time.Date(2026, 10, 19, 0, 0, 0, 0, time.UTC),
 	}
 	if err := valid.validate(); err != nil {
 		t.Fatalf("valid fill: %v", err)
@@ -187,6 +189,8 @@ func TestFillValidate(t *testing.T) {
 		{"negative fee", func(f *Fill) { f.Fee = d("-0.01") }},
 		{"fraction of a cent fee", func(f *Fill) { f.Fee = d("0.001") }},
 		{"worth less than half a cent", func(f *Fill) { f.Quantity, f.Price = d("0.000000001"), d("1") }},
+		{"no trade date", func(f *Fill) { f.TradeDate = time.Time{} }},
+		{"settles before it trades", func(f *Fill) { f.SettleDate = f.TradeDate.AddDate(0, 0, -1) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
