@@ -2,7 +2,8 @@
 //
 // Usage:
 //
-//	brokerd migrate   apply database migrations
+//	brokerd migrate     apply database migrations
+//	brokerd reconcile   check the ledger, exit 1 on any mismatch
 //
 // DATABASE_URL must be set.
 package main
@@ -16,10 +17,13 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/AmrMady/brokerd/internal/ledger"
 	"github.com/AmrMady/brokerd/internal/postgres"
 )
 
-const usage = "usage: brokerd migrate"
+const usage = "usage: brokerd migrate | reconcile"
 
 type config struct {
 	DatabaseURL string
@@ -48,7 +52,13 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	if len(args) != 1 {
 		return errors.New(usage)
 	}
-	if args[0] != "migrate" {
+	var command func(context.Context, *pgxpool.Pool, *slog.Logger) error
+	switch args[0] {
+	case "migrate":
+		command = migrate
+	case "reconcile":
+		command = reconcile
+	default:
 		return fmt.Errorf("unknown command %q; %s", args[0], usage)
 	}
 
@@ -61,10 +71,29 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		return err
 	}
 	defer pool.Close()
+	return command(ctx, pool, logger)
+}
 
-	if err = postgres.Migrate(ctx, pool); err != nil {
+func migrate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {
+	if err := postgres.Migrate(ctx, pool); err != nil {
 		return err
 	}
 	logger.Info("database migrated")
+	return nil
+}
+
+func reconcile(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {
+	report, err := ledger.Reconcile(ctx, pool)
+	if err != nil {
+		return err
+	}
+	for _, m := range report.Mismatches {
+		logger.Error("ledger mismatch",
+			"check", m.Check, "account", m.AccountID, "asset", m.Asset, "want", m.Want, "got", m.Got)
+	}
+	if !report.OK() {
+		return fmt.Errorf("reconcile found %d mismatches", len(report.Mismatches))
+	}
+	logger.Info("ledger reconciled", "ledger_accounts", report.LedgerAccounts, "lines", report.Lines)
 	return nil
 }

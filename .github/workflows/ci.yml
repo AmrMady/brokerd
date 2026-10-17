@@ -19,6 +19,22 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: brokerd
+          POSTGRES_PASSWORD: brokerd
+          POSTGRES_DB: brokerd
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U brokerd -d brokerd"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      BROKERD_TEST_DATABASE_URL: postgres://brokerd:brokerd@localhost:5432/brokerd?sslmode=disable
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
