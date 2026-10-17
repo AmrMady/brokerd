@@ -25,6 +25,9 @@ var (
 	ErrHoldClosed          = errors.New("hold is no longer active")
 	ErrHoldExceeded        = errors.New("fill exceeds its hold")
 	ErrAccountNotFound     = errors.New("account not found")
+	ErrAccountRestricted   = errors.New("account is restricted")
+	ErrAccountClosed       = errors.New("account is closed")
+	ErrAccountNotEmpty     = errors.New("account still has balances or holds")
 )
 
 // Querier is implemented by *pgxpool.Pool, *pgx.Conn and pgx.Tx.
@@ -77,7 +80,8 @@ func (c CashTransfer) validate() error {
 	return checkPositive("amount", c.Amount, usdScale)
 }
 
-// Deposit moves cash from the external bank into an account.
+// Deposit moves cash from the external bank into an account. Closed accounts
+// can't receive deposits.
 func Deposit(ctx context.Context, tx pgx.Tx, c CashTransfer) (Entry, error) {
 	if err := c.validate(); err != nil {
 		return Entry{}, err
@@ -90,11 +94,12 @@ func Deposit(ctx context.Context, tx pgx.Tx, c CashTransfer) (Entry, error) {
 			{AccountID: ExternalBank, Asset: USD, Amount: c.Amount.Neg()},
 			{AccountID: c.AccountID, Asset: USD, Amount: c.Amount},
 		},
-	})
+	}, AccountActive, AccountRestricted)
 }
 
 // Withdraw moves cash from an account to the external bank. It fails with
-// ErrInsufficientFunds if the amount is more than the available balance.
+// ErrInsufficientFunds if the amount is more than the available balance, and
+// only active accounts can withdraw.
 func Withdraw(ctx context.Context, tx pgx.Tx, c CashTransfer) (Entry, error) {
 	if err := c.validate(); err != nil {
 		return Entry{}, err
@@ -107,13 +112,20 @@ func Withdraw(ctx context.Context, tx pgx.Tx, c CashTransfer) (Entry, error) {
 			{AccountID: c.AccountID, Asset: USD, Amount: c.Amount.Neg()},
 			{AccountID: ExternalBank, Asset: USD, Amount: c.Amount},
 		},
-	})
+	}, AccountActive)
 }
 
-func postEntry(ctx context.Context, tx pgx.Tx, p posting) (Entry, error) {
+func postEntry(ctx context.Context, tx pgx.Tx, p posting, allowed ...AccountStatus) (Entry, error) {
+	status, err := lockAccount(ctx, tx, p.account)
+	if err != nil {
+		return Entry{}, err
+	}
 	pending, replayed, err := startEntry(ctx, tx, p)
 	if err != nil || pending == nil {
 		return replayed, err
+	}
+	if err = requireStatus(p.account, status, allowed...); err != nil {
+		return Entry{}, err
 	}
 	return pending.finish(ctx, tx, nil)
 }

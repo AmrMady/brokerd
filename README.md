@@ -46,6 +46,11 @@ Some notes on how it works:
   and check the available balance under the lock. Rows are always locked in
   the same order (customer rows, then system rows, by id), so concurrent
   writes don't deadlock.
+- Accounts are active, restricted or closed. A restricted account can still
+  receive deposits and settle orders it already placed, but can't withdraw or
+  place new holds. Closing needs every balance and hold at zero, and every
+  status change is recorded with a reason. Writes take a shared lock on the
+  account row first, so a close waits for postings in flight.
 - A hold reserves cash or shares for an open order (`available = balance -
   held`). Releasing and settling a hold are both conditional updates on
   `status = 'active'`, so a cancel and a fill can't both go through.

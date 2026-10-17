@@ -61,13 +61,17 @@ type Hold struct {
 }
 
 // PlaceHold reserves r.Amount. It fails with ErrInsufficientFunds if the
-// available balance is too low. Retrying with the same key returns the
-// original hold.
+// available balance is too low, and only active accounts can place holds.
+// Retrying with the same key returns the original hold.
 func PlaceHold(ctx context.Context, tx pgx.Tx, r HoldRequest) (Hold, error) {
 	if err := r.validate(); err != nil {
 		return Hold{}, err
 	}
-	if err := checkScales(ctx, tx, []Line{{AccountID: r.AccountID, Asset: r.Asset, Amount: r.Amount}}); err != nil {
+	status, err := lockAccount(ctx, tx, r.AccountID)
+	if err != nil {
+		return Hold{}, err
+	}
+	if err = checkScales(ctx, tx, []Line{{AccountID: r.AccountID, Asset: r.Asset, Amount: r.Amount}}); err != nil {
 		return Hold{}, err
 	}
 	ref := accountRef{account: r.AccountID, asset: r.Asset}
@@ -83,6 +87,9 @@ func PlaceHold(ctx context.Context, tx pgx.Tx, r HoldRequest) (Hold, error) {
 	}
 	if !claimed {
 		return replayHold(ctx, tx, r.AccountID, r.IdempotencyKey, hash)
+	}
+	if err = requireStatus(r.AccountID, status, AccountActive); err != nil {
+		return Hold{}, err
 	}
 
 	h := Hold{AccountID: r.AccountID, Asset: r.Asset, Amount: r.Amount, Status: HoldActive}
@@ -122,6 +129,13 @@ func replayHold(ctx context.Context, tx pgx.Tx, account, key string, hash []byte
 // ReleaseHold makes an active hold's amount available again. Releasing a
 // hold twice is a no-op; releasing a settled hold returns ErrHoldClosed.
 func ReleaseHold(ctx context.Context, tx pgx.Tx, holdID int64) (Hold, error) {
+	current, err := loadHold(ctx, tx, holdID)
+	if err != nil {
+		return Hold{}, err
+	}
+	if _, err = lockAccount(ctx, tx, current.AccountID); err != nil {
+		return Hold{}, err
+	}
 	h, closed, err := closeHold(ctx, tx, holdID, HoldReleased)
 	if err != nil {
 		return Hold{}, err

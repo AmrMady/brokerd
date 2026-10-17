@@ -127,6 +127,10 @@ func SettleFill(ctx context.Context, tx pgx.Tx, f Fill) (Entry, error) {
 	if _, err := loadHold(ctx, tx, f.HoldID); err != nil {
 		return Entry{}, err
 	}
+	status, err := lockAccount(ctx, tx, f.AccountID)
+	if err != nil {
+		return Entry{}, err
+	}
 	pending, replayed, err := startEntry(ctx, tx, posting{
 		account:  f.AccountID,
 		key:      f.ID,
@@ -137,6 +141,9 @@ func SettleFill(ctx context.Context, tx pgx.Tx, f Fill) (Entry, error) {
 	})
 	if err != nil || pending == nil {
 		return replayed, err
+	}
+	if err = requireStatus(f.AccountID, status, AccountActive, AccountRestricted); err != nil {
+		return Entry{}, err
 	}
 
 	hold, closed, err := closeHold(ctx, tx, f.HoldID, HoldSettled)
