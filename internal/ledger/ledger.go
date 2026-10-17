@@ -30,6 +30,7 @@ var (
 	ErrAccountNotEmpty     = errors.New("account still has balances, holds or pending transfers")
 	ErrTransferNotFound    = errors.New("transfer not found")
 	ErrTransferStatus      = errors.New("transfer status doesn't allow this")
+	ErrEntryNotFound       = errors.New("journal entry not found")
 )
 
 // Querier is implemented by *pgxpool.Pool, *pgx.Conn and pgx.Tx.
@@ -48,6 +49,7 @@ const (
 	KindDepositReturn    Kind = "deposit_return"
 	KindWithdrawalReturn Kind = "withdrawal_return"
 	KindTradeFill        Kind = "trade_fill"
+	KindReversal         Kind = "reversal"
 )
 
 // Line adds Amount of Asset to an account. Negative amounts take it away.
@@ -59,13 +61,14 @@ type Line struct {
 
 // Entry is a set of lines, summing to zero per asset, posted atomically.
 type Entry struct {
-	ID         int64
-	Kind       Kind
-	HoldID     int64 // hold the entry took from, if any
-	TransferID int64 // transfer the entry booked, if any
-	Metadata   map[string]string
-	Lines      []Line
-	CreatedAt  time.Time
+	ID              int64
+	Kind            Kind
+	HoldID          int64 // hold the entry took from, if any
+	TransferID      int64 // transfer the entry booked, if any
+	ReversesEntryID int64 // entry this one reverses, if any
+	Metadata        map[string]string
+	Lines           []Line
+	CreatedAt       time.Time
 }
 
 // CashTransfer is a request to deposit or withdraw cash.

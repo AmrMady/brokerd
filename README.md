@@ -11,8 +11,8 @@ Done:
 - Ledger: brokerage accounts holding USD cash and fractional share positions
   in Postgres. Deposits and withdrawals that go through a bank transfer
   lifecycle, holds for open orders, settlement of trade fills (including
-  partial fills) with fees, balances, account history and a reconcile
-  command.
+  partial fills) with fees, reversals, balances, account history and a
+  reconcile command.
 
 Planned:
 
@@ -37,6 +37,7 @@ accounts sit on one side; the system accounts `external_bank`, `clearing`,
 | Deposit returned  | external_bank +X, customer -a, deficits -(X-a)                                     |
 | Buy q @ p, fee f  | customer USD -(n+f), clearing USD +n, fees +f, clearing SYM -q, customer SYM +q    |
 | Sell q @ p, fee f | customer SYM -q, clearing SYM +q, clearing USD -n, customer USD +(n-f), fees +f    |
+| Reversal          | every line of the reversed entry, negated                                          |
 
 `n` is `q * p` rounded half-to-even to the cent. `a` is what the customer
 still has available when a deposit comes back.
@@ -68,6 +69,10 @@ Some notes on how it works:
 - Transfer requests, holds and fills take an idempotency key, scoped to
   the account. Retrying a request returns the original result; reusing a key
   for a different request is an error.
+- Mistakes are corrected with a reversal, never an edit. An entry can only be
+  reversed once (`reverses_entry_id` is unique), and a trigger checks at
+  commit that the reversal mirrors it exactly. Only trade fills are reversed
+  this way; transfers are undone through their own lifecycle.
 - Postgres checks the invariants too: a deferred trigger rejects entries that
   don't balance, the journal is append-only, and customer balances can't go
   negative.

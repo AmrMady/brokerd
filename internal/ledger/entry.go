@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -20,6 +21,7 @@ type posting struct {
 	kind       Kind
 	holdID     int64
 	transferID int64
+	reverses   int64
 	metadata   map[string]string
 	lines      []Line
 }
@@ -209,28 +211,32 @@ func (p *pendingEntry) finish(ctx context.Context, tx pgx.Tx, heldChanges map[in
 	lines := slices.Clone(p.lines)
 	sortLines(lines)
 	return Entry{
-		ID:         p.id,
-		Kind:       p.kind,
-		HoldID:     p.holdID,
-		TransferID: p.transferID,
-		Metadata:   p.metadata,
-		Lines:      lines,
-		CreatedAt:  p.createdAt,
+		ID:              p.id,
+		Kind:            p.kind,
+		HoldID:          p.holdID,
+		TransferID:      p.transferID,
+		ReversesEntryID: p.reverses,
+		Metadata:        p.metadata,
+		Lines:           lines,
+		CreatedAt:       p.createdAt,
 	}, nil
 }
 
 func loadEntry(ctx context.Context, q Querier, id int64) (Entry, error) {
 	e := Entry{ID: id}
-	var holdID, transferID *int64
+	var holdID, transferID, reverses *int64
 	err := q.QueryRow(ctx, `
-		SELECT kind, hold_id, transfer_id, metadata, created_at
+		SELECT kind, hold_id, transfer_id, reverses_entry_id, metadata, created_at
 		FROM journal_entries
 		WHERE id = $1`, id,
-	).Scan(&e.Kind, &holdID, &transferID, &e.Metadata, &e.CreatedAt)
+	).Scan(&e.Kind, &holdID, &transferID, &reverses, &e.Metadata, &e.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Entry{}, fmt.Errorf("%w: %d", ErrEntryNotFound, id)
+	}
 	if err != nil {
 		return Entry{}, fmt.Errorf("load journal entry %d: %w", id, err)
 	}
-	e.HoldID, e.TransferID = deref(holdID), deref(transferID)
+	e.HoldID, e.TransferID, e.ReversesEntryID = deref(holdID), deref(transferID), deref(reverses)
 
 	rows, err := q.Query(ctx, `
 		SELECT la.account_id::text, l.asset, l.amount
