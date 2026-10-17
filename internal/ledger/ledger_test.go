@@ -2,6 +2,7 @@ package ledger_test
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -243,6 +244,55 @@ func TestSettleFillHoldRules(t *testing.T) {
 
 	l.wantBalance(t, alice, ledger.USD, "949", "100") // 1000 - 51; h4 still active
 	l.requireReconciled(t)
+}
+
+func TestHistoryPagesNewestFirst(t *testing.T) {
+	t.Parallel()
+	l := newTestLedger(t)
+	alice := l.openAccount(t)
+
+	for i := 1; i <= 25; i++ {
+		_, err := l.deposit(fmt.Sprintf("d%d", i), alice, fmt.Sprint(i))
+		noErr(t, err)
+	}
+
+	var (
+		versions []int64
+		sizes    []int
+		before   int64
+	)
+	for {
+		page, err := ledger.History(l.ctx, l.pool, alice, ledger.USD, before, 10)
+		noErr(t, err)
+		sizes = append(sizes, len(page.Items))
+		for _, it := range page.Items {
+			if it.Kind != ledger.KindDeposit || !it.Amount.Equal(dec(fmt.Sprint(it.Version))) {
+				t.Errorf("item %+v: want deposit of %d", it, it.Version)
+			}
+			versions = append(versions, it.Version)
+		}
+		if page.Next == 0 {
+			break
+		}
+		before = page.Next
+	}
+
+	if fmt.Sprint(sizes) != "[10 10 5]" {
+		t.Errorf("page sizes = %v, want [10 10 5]", sizes)
+	}
+	for i, v := range versions {
+		if v != int64(25-i) {
+			t.Fatalf("versions = %v, want 25 down to 1", versions)
+		}
+	}
+
+	page, err := ledger.History(l.ctx, l.pool, l.openAccount(t), ledger.USD, 0, 10)
+	noErr(t, err)
+	if len(page.Items) != 0 || page.Next != 0 {
+		t.Errorf("history of a new account = %+v, want empty", page)
+	}
+	_, err = ledger.History(l.ctx, l.pool, alice, ledger.USD, 0, ledger.MaxPageSize+1)
+	wantErr(t, err, ledger.ErrInvalid)
 }
 
 func (l testLedger) exec(t *testing.T, sql string, args ...any) error {
