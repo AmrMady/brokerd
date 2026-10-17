@@ -38,7 +38,28 @@ func newTestLedger(t *testing.T) testLedger {
 			t.Fatalf("add asset %s: %v", symbol, err)
 		}
 	}
+	// Regulatory fees are zero unless a test sets a rate.
+	noErr(t, l.addFeeRate(ledger.SECFee, "2000-01-01", "0", ""))
+	noErr(t, l.addFeeRate(ledger.TAF, "2000-01-01", "0", "0"))
 	return l
+}
+
+func (l testLedger) addFeeRate(fee ledger.RegulatoryFee, effectiveOn, rate, maxPerTrade string) error {
+	r := ledger.FeeRate{Fee: fee, Rate: dec(rate)}
+	var err error
+	if r.EffectiveOn, err = time.Parse(time.DateOnly, effectiveOn); err != nil {
+		return err
+	}
+	if maxPerTrade != "" {
+		r.MaxPerTrade = decimal.NewNullDecimal(dec(maxPerTrade))
+	}
+	return l.addRate(r)
+}
+
+func (l testLedger) addRate(r ledger.FeeRate) error {
+	return pgx.BeginFunc(l.ctx, l.pool, func(tx pgx.Tx) error {
+		return ledger.AddFeeRate(l.ctx, tx, r)
+	})
 }
 
 func (l testLedger) addAsset(symbol ledger.Asset, scale int32) error {

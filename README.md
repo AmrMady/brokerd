@@ -11,8 +11,9 @@ Done:
 - Ledger: brokerage accounts holding USD cash and fractional share positions
   in Postgres. Deposits and withdrawals that go through a bank transfer
   lifecycle, holds for open orders, trade fills (including partial fills)
-  with fees, T+1 settlement of sale proceeds, tax lots with realized gains
-  and losses, reversals, balances, account history and a reconcile command.
+  with fees, SEC and FINRA regulatory fees on sells, T+1 settlement of sale
+  proceeds, tax lots with realized gains and losses, reversals, balances,
+  account history and a reconcile command.
 
 Planned:
 
@@ -28,19 +29,22 @@ Planned:
 Every change is a journal entry whose lines sum to zero for each asset. Each
 account has one ledger row per asset it holds, carrying the balance. Customer
 accounts sit on one side; the system accounts `external_bank`, `clearing`,
-`fees` and `deficits` (rows in the same `accounts` table) sit on the other.
+`fees`, `deficits`, `sec_fee_payable` and `taf_payable` (rows in the same
+`accounts` table) sit on the other.
 
-| Operation         | Lines                                                                              |
-|-------------------|------------------------------------------------------------------------------------|
-| Deposit X         | external_bank -X, customer +X                                                      |
-| Withdraw X        | customer -X, external_bank +X                                                      |
-| Deposit returned  | external_bank +X, customer -a, deficits -(X-a)                                     |
-| Buy q @ p, fee f  | customer USD -(n+f), clearing USD +n, fees +f, clearing SYM -q, customer SYM +q    |
-| Sell q @ p, fee f | customer SYM -q, clearing SYM +q, clearing USD -n, customer USD +(n-f), fees +f    |
-| Reversal          | every line of the reversed entry, negated                                          |
+| Operation         | Lines                                                                                   |
+|-------------------|-----------------------------------------------------------------------------------------|
+| Deposit X         | external_bank -X, customer +X                                                           |
+| Withdraw X        | customer -X, external_bank +X                                                           |
+| Deposit returned  | external_bank +X, customer -a, deficits -(X-a)                                          |
+| Buy q @ p, fee f  | customer USD -(n+f), clearing USD +n, fees +f, clearing SYM -q, customer SYM +q         |
+| Sell q @ p, fee f | customer SYM -q, clearing SYM +q, clearing USD -n, customer USD +(n-f-s-t), fees +f,    |
+|                   | sec_fee_payable +s, taf_payable +t                                                      |
+| Reversal          | every line of the reversed entry, negated                                               |
 
-`n` is `q * p` rounded half-to-even to the cent. `a` is what the customer
-still has available when a deposit comes back.
+`n` is `q * p` rounded half-to-even to the cent. `s` and `t` are the SEC fee
+and FINRA's trading activity fee (TAF). `a` is what the customer still has
+available when a deposit comes back.
 
 Some notes on how it works:
 
@@ -74,6 +78,13 @@ Some notes on how it works:
   settlement date. `brokerd settle` settles everything due; each settlement is
   a compare-and-set on its status, so runs can repeat or overlap safely. The
   settlement date comes with the fill from whoever executed the trade.
+- Sells pay the SEC fee (per dollar sold) and TAF (per share sold, capped
+  per trade) at the rates in effect on the trade date, each rounded up to
+  the cent. Rates are loaded with `brokerd fee-rate` from the published
+  schedules, and a sell with no rate in effect fails rather than charging
+  nothing. Each entry records the rates it was charged, and the idempotency
+  key covers the fill as requested, so a retry returns the original entry
+  even if the schedule changed since.
 - Every buy opens a tax lot with its cost (fee included). Sells take shares
   from the oldest lots first (FIFO) and record the gain or loss on each lot,
   short- or long-term by holding period. A sell locks the position's open
@@ -102,6 +113,15 @@ make db-up      # Postgres in Docker
 make migrate
 make reconcile
 make settle     # settle trades due today
+```
+
+Sells need regulatory fee rates. Add each rate the SEC and FINRA publish,
+with the date it takes effect. The SEC rate is per dollar sold, so $27.80
+per million is 0.0000278. TAF is per share sold, with a maximum per trade.
+
+```bash
+go run ./cmd/brokerd fee-rate sec YYYY-MM-DD RATE
+go run ./cmd/brokerd fee-rate taf YYYY-MM-DD RATE MAX
 ```
 
 ## Tests

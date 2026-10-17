@@ -24,6 +24,7 @@ type posting struct {
 	reverses   int64
 	metadata   map[string]string
 	lines      []Line
+	request    []byte // what the idempotency key is checked against; hash() if nil
 }
 
 func validateLines(lines []Line) error {
@@ -138,7 +139,10 @@ func startEntry(ctx context.Context, tx pgx.Tx, p posting) (*pendingEntry, Entry
 	if err != nil {
 		return nil, Entry{}, err
 	}
-	hash := p.hash()
+	hash := p.request
+	if hash == nil {
+		hash = p.hash()
+	}
 	claimed, err := claimKey(ctx, tx, p.account, p.key, hash)
 	if err != nil {
 		return nil, Entry{}, err

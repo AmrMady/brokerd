@@ -81,16 +81,22 @@ func (f Fill) validate() error {
 	return nil
 }
 
-// proceeds is the cash a sell adds to the account, which stays unsettled
-// until the settlement date.
-func (f Fill) proceeds() decimal.Decimal {
+// netProceeds is what a sell adds to the account's cash after its fees. It's
+// negative if the fees are more than the sale.
+func (f Fill) netProceeds(r regulatoryFees) decimal.Decimal {
+	return f.Notional().Sub(f.Fee).Sub(r.total())
+}
+
+// unsettledCash is the cash a fill adds that stays unsettled until the
+// settlement date.
+func (f Fill) unsettledCash(r regulatoryFees) decimal.Decimal {
 	if f.Side == Buy {
 		return decimal.Zero
 	}
-	return decimal.Max(f.Notional().Sub(f.Fee), decimal.Zero)
+	return decimal.Max(f.netProceeds(r), decimal.Zero)
 }
 
-func (f Fill) lines() []Line {
+func (f Fill) lines(r regulatoryFees) []Line {
 	n := f.Notional()
 	var lines []Line
 	switch f.Side {
@@ -106,13 +112,16 @@ func (f Fill) lines() []Line {
 			{AccountID: f.AccountID, Asset: f.Symbol, Amount: f.Quantity.Neg()},
 			{AccountID: Clearing, Asset: f.Symbol, Amount: f.Quantity},
 			{AccountID: Clearing, Asset: USD, Amount: n.Neg()},
-			{AccountID: f.AccountID, Asset: USD, Amount: n.Sub(f.Fee)},
+			{AccountID: f.AccountID, Asset: USD, Amount: f.netProceeds(r)},
 		}
 	}
-	if f.Fee.IsPositive() {
-		lines = append(lines, Line{AccountID: Fees, Asset: USD, Amount: f.Fee})
-	}
-	// A sell whose fee equals its proceeds has a zero cash line.
+	lines = append(lines,
+		Line{AccountID: Fees, Asset: USD, Amount: f.Fee},
+		Line{AccountID: SECFeePayable, Asset: USD, Amount: r.sec},
+		Line{AccountID: TAFPayable, Asset: USD, Amount: r.taf},
+	)
+	// Fees can be zero, and a sell whose fees equal its proceeds has a zero
+	// cash line.
 	return slices.DeleteFunc(lines, func(l Line) bool { return l.Amount.IsZero() })
 }
 
@@ -147,7 +156,8 @@ func (f Fill) metadata() map[string]string {
 //
 // Positions change on the trade date. A sell's proceeds can be traded with
 // right away but stay unsettled, and can't be withdrawn, until SettleDue
-// settles them.
+// settles them. Sells also pay the SEC fee and TAF at the rates in effect on
+// the trade date, and fail with ErrNoFeeRate if there is none.
 func SettleFill(ctx context.Context, tx pgx.Tx, f Fill) (Entry, error) {
 	if err := f.validate(); err != nil {
 		return Entry{}, err
@@ -164,14 +174,27 @@ func SettleFill(ctx context.Context, tx pgx.Tx, f Fill) (Entry, error) {
 	if err != nil {
 		return Entry{}, err
 	}
-	pending, replayed, err := startEntry(ctx, tx, posting{
+	fees, err := feesFor(ctx, tx, f)
+	if err != nil {
+		return Entry{}, err
+	}
+	p := posting{
 		account:  f.AccountID,
 		key:      f.ID,
 		kind:     KindTradeFill,
 		holdID:   f.HoldID,
 		metadata: f.metadata(),
-		lines:    f.lines(),
-	})
+		lines:    f.lines(regulatoryFees{}),
+	}
+	// The idempotency key covers the fill as it was requested. Its regulatory
+	// fees depend on the rate schedule, which can change before a retry.
+	p.request = p.hash()
+	p.lines = f.lines(fees)
+	if f.Side == Sell {
+		p.metadata["sec_fee_rate"] = fees.secRate.String()
+		p.metadata["taf_rate"] = fees.tafRate.String()
+	}
+	pending, replayed, err := startEntry(ctx, tx, p)
 	if err != nil || pending == nil {
 		return replayed, err
 	}
@@ -188,7 +211,7 @@ func SettleFill(ctx context.Context, tx pgx.Tx, f Fill) (Entry, error) {
 	if f.Side == Buy {
 		err = openLot(ctx, tx, position, pending.id, f)
 	} else {
-		err = sellLots(ctx, tx, position, pending.id, f)
+		err = sellLots(ctx, tx, position, pending.id, f, f.netProceeds(fees))
 	}
 	if err != nil {
 		return Entry{}, err
@@ -196,15 +219,15 @@ func SettleFill(ctx context.Context, tx pgx.Tx, f Fill) (Entry, error) {
 	_, err = tx.Exec(ctx, `
 		INSERT INTO settlements (entry_id, ledger_account_id, unsettled_cash, trade_date, settle_date)
 		VALUES ($1, $2, $3, $4, $5)`,
-		pending.id, cash[cashRef], f.proceeds(), dateOnly(f.TradeDate), dateOnly(f.SettleDate))
+		pending.id, cash[cashRef], f.unsettledCash(fees), dateOnly(f.TradeDate), dateOnly(f.SettleDate))
 	if err != nil {
 		return Entry{}, fmt.Errorf("insert settlement: %w", err)
 	}
 
 	extra := map[int64]change{held: {held: need.Neg()}}
-	if p := f.proceeds(); p.IsPositive() {
+	if u := f.unsettledCash(fees); u.IsPositive() {
 		c := extra[cash[cashRef]]
-		c.unsettled = p
+		c.unsettled = u
 		extra[cash[cashRef]] = c
 	}
 	return pending.finish(ctx, tx, extra)

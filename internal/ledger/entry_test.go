@@ -79,6 +79,7 @@ func TestFillLines(t *testing.T) {
 	tests := []struct {
 		name string
 		fill Fill
+		fees regulatoryFees
 		want map[accountRef]string
 	}{
 		{
@@ -104,6 +105,20 @@ func TestFillLines(t *testing.T) {
 			},
 		},
 		{
+			name: "sell with regulatory fees",
+			fill: Fill{AccountID: "alice", Symbol: "AAPL", Side: Sell, Quantity: d("4"), Price: d("60"), Fee: d("1")},
+			fees: regulatoryFees{sec: d("0.01"), taf: d("0.02")},
+			want: map[accountRef]string{
+				{"alice", "AAPL"}:    "-4",
+				{Clearing, "AAPL"}:   "4",
+				{Clearing, USD}:      "-240",
+				{"alice", USD}:       "238.97",
+				{Fees, USD}:          "1",
+				{SECFeePayable, USD}: "0.01",
+				{TAFPayable, USD}:    "0.02",
+			},
+		},
+		{
 			name: "no fee, no fee line",
 			fill: Fill{AccountID: "alice", Symbol: "AAPL", Side: Buy, Quantity: d("1"), Price: d("10")},
 			want: map[accountRef]string{
@@ -126,7 +141,7 @@ func TestFillLines(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			lines := tt.fill.lines()
+			lines := tt.fill.lines(tt.fees)
 			if err := validateLines(lines); err != nil {
 				t.Fatalf("fill lines are not a valid entry: %v", err)
 			}

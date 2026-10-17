@@ -32,6 +32,7 @@ var (
 	ErrTransferNotFound    = errors.New("transfer not found")
 	ErrTransferStatus      = errors.New("transfer status doesn't allow this")
 	ErrEntryNotFound       = errors.New("journal entry not found")
+	ErrNoFeeRate           = errors.New("no regulatory fee rate in effect")
 )
 
 // Querier is implemented by *pgxpool.Pool, *pgx.Conn and pgx.Tx.

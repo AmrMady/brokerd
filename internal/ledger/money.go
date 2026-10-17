@@ -18,14 +18,18 @@ const USD Asset = "USD"
 // System accounts, created by the migrations. They are the other side of
 // every movement, and their balances can go negative. Deficits is what
 // customers owe the firm after a returned deposit they had already spent.
+// SECFeePayable and TAFPayable hold the regulatory fees collected on sells
+// until the firm pays them.
 const (
-	ExternalBank = "00000000-0000-0000-0000-000000000001"
-	Clearing     = "00000000-0000-0000-0000-000000000002"
-	Fees         = "00000000-0000-0000-0000-000000000003"
-	Deficits     = "00000000-0000-0000-0000-000000000004"
+	ExternalBank  = "00000000-0000-0000-0000-000000000001"
+	Clearing      = "00000000-0000-0000-0000-000000000002"
+	Fees          = "00000000-0000-0000-0000-000000000003"
+	Deficits      = "00000000-0000-0000-0000-000000000004"
+	SECFeePayable = "00000000-0000-0000-0000-000000000005"
+	TAFPayable    = "00000000-0000-0000-0000-000000000006"
 )
 
-var systemAccounts = []string{ExternalBank, Clearing, Fees, Deficits}
+var systemAccounts = []string{ExternalBank, Clearing, Fees, Deficits, SECFeePayable, TAFPayable}
 
 var symbolPattern = regexp.MustCompile(`^[A-Z][A-Z0-9.]{0,9}$`)
 

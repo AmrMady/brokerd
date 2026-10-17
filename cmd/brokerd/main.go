@@ -6,6 +6,11 @@
 //	brokerd reconcile           check the ledger, exit 1 on any mismatch
 //	brokerd settle [YYYY-MM-DD] settle trades due on or before the date
 //	                            (default: today in New York)
+//	brokerd fee-rate sec YYYY-MM-DD RATE
+//	brokerd fee-rate taf YYYY-MM-DD RATE MAX
+//	                            add a regulatory fee rate effective on the
+//	                            date: per dollar sold for the SEC fee, per
+//	                            share sold for TAF, with TAF's maximum per trade
 //
 // DATABASE_URL must be set.
 package main
@@ -24,12 +29,13 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 
 	"github.com/AmrMady/brokerd/internal/ledger"
 	"github.com/AmrMady/brokerd/internal/postgres"
 )
 
-const usage = "usage: brokerd migrate | reconcile | settle [YYYY-MM-DD]"
+const usage = "usage: brokerd migrate | reconcile | settle [YYYY-MM-DD] | fee-rate sec|taf YYYY-MM-DD RATE [MAX]"
 
 const settleBatchSize = 500
 
@@ -73,6 +79,14 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		}
 		command = func(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {
 			return settle(ctx, pool, logger, asOf)
+		}
+	case args[0] == "fee-rate" && (len(args) == 4 || len(args) == 5):
+		rate, err := parseFeeRate(args[1:])
+		if err != nil {
+			return err
+		}
+		command = func(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {
+			return addFeeRate(ctx, pool, logger, rate)
 		}
 	default:
 		return fmt.Errorf("unknown command %q; %s", strings.Join(args, " "), usage)
@@ -156,4 +170,34 @@ func settleBatch(ctx context.Context, pool *pgxpool.Pool, asOf time.Time) (int, 
 		return 0, err
 	}
 	return n, nil
+}
+
+func parseFeeRate(args []string) (ledger.FeeRate, error) {
+	r := ledger.FeeRate{Fee: ledger.RegulatoryFee(args[0])}
+	var err error
+	if r.EffectiveOn, err = time.Parse(time.DateOnly, args[1]); err != nil {
+		return r, fmt.Errorf("effective date: %w", err)
+	}
+	if r.Rate, err = decimal.NewFromString(args[2]); err != nil {
+		return r, fmt.Errorf("rate: %w", err)
+	}
+	if len(args) == 4 {
+		var maxPerTrade decimal.Decimal
+		if maxPerTrade, err = decimal.NewFromString(args[3]); err != nil {
+			return r, fmt.Errorf("maximum per trade: %w", err)
+		}
+		r.MaxPerTrade = decimal.NewNullDecimal(maxPerTrade)
+	}
+	return r, nil
+}
+
+func addFeeRate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, r ledger.FeeRate) error {
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		return ledger.AddFeeRate(ctx, tx, r)
+	}); err != nil {
+		return err
+	}
+	logger.Info("fee rate added", "fee", r.Fee, "effective_on", r.EffectiveOn.Format(time.DateOnly),
+		"rate", r.Rate, "max_per_trade", r.MaxPerTrade)
+	return nil
 }

@@ -118,11 +118,12 @@ type openLotRow struct {
 }
 
 // sellLots takes a sell's shares out of the position's open lots, oldest
-// first, and records the gain or loss on each lot. A lot's cost goes with its
+// first, and records the gain or loss on each lot. proceeds are net of all
+// fees. A lot's cost goes with its
 // shares in proportion to what's left of it, so the last share takes the
 // last of the cost. The proceeds are split the same way across the lots
 // used. Both are rounded to the cent, and nothing is lost to rounding.
-func sellLots(ctx context.Context, tx pgx.Tx, position, entryID int64, f Fill) error {
+func sellLots(ctx context.Context, tx pgx.Tx, position, entryID int64, f Fill, proceeds decimal.Decimal) error {
 	// Locked in the order they're used, the same order for every sell.
 	rows, err := tx.Query(ctx, `
 		SELECT id, remaining, remaining_cost, acquired_on
@@ -142,7 +143,6 @@ func sellLots(ctx context.Context, tx pgx.Tx, position, entryID int64, f Fill) e
 		return fmt.Errorf("lock lots: %w", err)
 	}
 
-	proceeds := f.Notional().Sub(f.Fee)
 	soldOn := dateOnly(f.TradeDate)
 	left, allocated := f.Quantity, decimal.Zero
 	for _, lot := range lots {

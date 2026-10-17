@@ -223,9 +223,9 @@ func TestMigrationAddsLotsForExistingPositions(t *testing.T) {
 	}()
 	provider, err := goose.NewProvider(goose.DialectPostgres, db, migrations.FS)
 	noErr(t, err)
-	_, err = provider.DownTo(l.ctx, 7)
+	_, err = provider.ApplyVersion(l.ctx, 8, false)
 	noErr(t, err)
-	_, err = provider.Up(l.ctx)
+	_, err = provider.ApplyVersion(l.ctx, 8, true)
 	noErr(t, err)
 
 	lots, err := ledger.OpenLots(l.ctx, l.pool, alice, "AAPL")
