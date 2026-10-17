@@ -15,6 +15,7 @@ const (
 	CheckBalance    = "balance"     // balance equals the sum of the account's lines
 	CheckHeld       = "held"        // held equals what's left of the account's active holds
 	CheckUnsettled  = "unsettled"   // unsettled equals the account's pending settlements
+	CheckLots       = "lots"        // a position equals what's left of its tax lots
 	CheckAvailable  = "available"   // customer accounts have no negative available balance
 )
 
@@ -70,6 +71,13 @@ var reconcileQueries = []struct {
 			SELECT ledger_account_id, SUM(unsettled_cash) AS total FROM settlements WHERE status = 'pending' GROUP BY ledger_account_id
 		) s ON s.ledger_account_id = la.id
 		WHERE la.unsettled <> COALESCE(s.total, 0)`},
+	{CheckLots, `
+		SELECT la.account_id::text, la.asset, COALESCE(t.total, 0), la.balance
+		FROM ledger_accounts la
+		LEFT JOIN (
+			SELECT ledger_account_id, SUM(remaining) AS total FROM tax_lots GROUP BY ledger_account_id
+		) t ON t.ledger_account_id = la.id
+		WHERE la.kind = 'customer' AND la.asset <> 'USD' AND la.balance <> COALESCE(t.total, 0)`},
 	{CheckAvailable, `
 		SELECT account_id::text, asset, 0::numeric, balance - held
 		FROM ledger_accounts

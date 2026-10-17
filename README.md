@@ -11,8 +11,8 @@ Done:
 - Ledger: brokerage accounts holding USD cash and fractional share positions
   in Postgres. Deposits and withdrawals that go through a bank transfer
   lifecycle, holds for open orders, trade fills (including partial fills)
-  with fees, T+1 settlement of sale proceeds, reversals, balances, account
-  history and a reconcile command.
+  with fees, T+1 settlement of sale proceeds, tax lots with realized gains
+  and losses, reversals, balances, account history and a reconcile command.
 
 Planned:
 
@@ -74,15 +74,24 @@ Some notes on how it works:
   settlement date. `brokerd settle` settles everything due; each settlement is
   a compare-and-set on its status, so runs can repeat or overlap safely. The
   settlement date comes with the fill from whoever executed the trade.
+- Every buy opens a tax lot with its cost (fee included). Sells take shares
+  from the oldest lots first (FIFO) and record the gain or loss on each lot,
+  short- or long-term by holding period. A sell locks the position's open
+  lots in that same order, so concurrent sells queue instead of taking the
+  same shares. Cost and proceeds are split to the cent with nothing lost to
+  rounding.
 - Mistakes are corrected with a reversal, never an edit. An entry can only be
   reversed once (`reverses_entry_id` is unique), and a trigger checks at
   commit that the reversal mirrors it exactly. Only trade fills are reversed
-  this way; transfers are undone through their own lifecycle.
+  this way; transfers are undone through their own lifecycle. Reversing a
+  sell puts its shares back in the lots it took them from; a buy can't be
+  reversed once any of its shares were sold.
 - Postgres checks the invariants too: a deferred trigger rejects entries that
   don't balance, the journal is append-only, and customer balances can't go
   negative.
-- `brokerd reconcile` rebuilds every balance from the journal and exits
-  non-zero if anything is off.
+- `brokerd reconcile` rebuilds every balance from the journal, checks that
+  each position matches its open lots, and exits non-zero if anything is
+  off.
 - Ledger functions take a `pgx.Tx`, so a caller can post to the ledger and
   write its own rows in one transaction.
 

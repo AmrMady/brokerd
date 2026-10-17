@@ -3,6 +3,7 @@ package ledger_test
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -403,16 +404,9 @@ func TestReconcileReportsTampering(t *testing.T) {
 }
 
 func sameMismatches(got, want []ledger.Mismatch) bool {
-	if len(got) != len(want) {
-		return false
-	}
-	for i := range got {
-		g, w := got[i], want[i]
-		if g.Check != w.Check || g.AccountID != w.AccountID || g.Asset != w.Asset || !g.Want.Equal(w.Want) || !g.Got.Equal(w.Got) {
-			return false
-		}
-	}
-	return true
+	return slices.EqualFunc(got, want, func(g, w ledger.Mismatch) bool {
+		return g.Check == w.Check && g.AccountID == w.AccountID && g.Asset == w.Asset && g.Want.Equal(w.Want) && g.Got.Equal(w.Got)
+	})
 }
 
 func TestDatabaseBackstops(t *testing.T) {

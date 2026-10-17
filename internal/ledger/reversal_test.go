@@ -88,7 +88,7 @@ func TestReverseRules(t *testing.T) {
 	})
 	noErr(t, err)
 	_, err = l.reverse(bought.ID, "busted")
-	wantErr(t, err, ledger.ErrInsufficientFunds)
+	wantErr(t, err, ledger.ErrInvalid)
 
 	other := l.buy(t, "f3", alice, "2", "50")
 	rev, err := l.reverse(other.ID, "busted")

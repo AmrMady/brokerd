@@ -184,6 +184,15 @@ func SettleFill(ctx context.Context, tx pgx.Tx, f Fill) (Entry, error) {
 	if err = consumeHold(ctx, tx, f.HoldID, held, need); err != nil {
 		return Entry{}, err
 	}
+	position := pending.accounts[accountRef{account: f.AccountID, asset: f.Symbol}]
+	if f.Side == Buy {
+		err = openLot(ctx, tx, position, pending.id, f)
+	} else {
+		err = sellLots(ctx, tx, position, pending.id, f)
+	}
+	if err != nil {
+		return Entry{}, err
+	}
 	_, err = tx.Exec(ctx, `
 		INSERT INTO settlements (entry_id, ledger_account_id, unsettled_cash, trade_date, settle_date)
 		VALUES ($1, $2, $3, $4, $5)`,

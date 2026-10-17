@@ -13,9 +13,10 @@ import (
 // ReverseEntry posts a new entry that undoes entryID line by line, to correct
 // a mistake such as a busted trade. Only trade fills can be reversed:
 // transfers are undone with ReturnTransfer, which keeps the transfer's status
-// in step. Reversing a fill doesn't touch its hold, and cancels its
-// settlement if it hasn't settled yet. Reversing an entry twice returns the
-// first reversal.
+// in step. Reversing a fill doesn't touch its hold, cancels its settlement if
+// it hasn't settled yet, and undoes what it did to tax lots; a buy can't be
+// reversed once any of its shares were sold. Reversing an entry twice returns
+// the first reversal.
 func ReverseEntry(ctx context.Context, tx pgx.Tx, entryID int64, reason string) (Entry, error) {
 	if err := validateReason(reason); err != nil {
 		return Entry{}, err
@@ -84,6 +85,9 @@ func ReverseEntry(ctx context.Context, tx pgx.Tx, entryID int64, reason string) 
 		}
 	case !errors.Is(err, pgx.ErrNoRows):
 		return Entry{}, fmt.Errorf("cancel settlement of entry %d: %w", entryID, err)
+	}
+	if err = reverseLots(ctx, tx, entryID); err != nil {
+		return Entry{}, err
 	}
 	return pending.finish(ctx, tx, extra)
 }
