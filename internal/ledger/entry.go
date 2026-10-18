@@ -128,6 +128,9 @@ func (p *pendingEntry) insert(ctx context.Context, tx pgx.Tx) error {
 	if err != nil {
 		return fmt.Errorf("insert journal entry: %w", err)
 	}
+	if err = recordActivity(ctx, tx, p.id, p.lines); err != nil {
+		return err
+	}
 	if p.key == "" {
 		return nil
 	}

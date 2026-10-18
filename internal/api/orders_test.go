@@ -130,7 +130,7 @@ func TestPositionsAndActivities(t *testing.T) {
 	if field(fill, "type") != "trade_fill" || field(fill, "details", "symbol") != "AAPL" {
 		t.Errorf("newest activity %v, want the fill", fill.body)
 	}
-	next := c.do("GET", fmt.Sprintf("%s?limit=10&before=%v", path, field(fill, "id")), "", "Authorization", key)
+	next := c.do("GET", fmt.Sprintf("%s?limit=10&before=%v", path, field(fill, "seq")), "", "Authorization", key)
 	if len(next.list) != 1 {
 		t.Fatalf("second page %v, want the deposit", next.list)
 	}

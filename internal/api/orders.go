@@ -156,6 +156,7 @@ func (s *Server) positions(w http.ResponseWriter, r *http.Request) error {
 
 type activityJSON struct {
 	ID        int64             `json:"id"`
+	Seq       int64             `json:"seq"`
 	Type      string            `json:"type"`
 	CreatedAt time.Time         `json:"created_at"`
 	Details   map[string]string `json:"details"`
@@ -175,7 +176,7 @@ func (s *Server) activities(w http.ResponseWriter, r *http.Request) error {
 	var before int64
 	if v := r.URL.Query().Get("before"); v != "" {
 		if before, err = strconv.ParseInt(v, 10, 64); err != nil || before < 1 {
-			return newError(http.StatusUnprocessableEntity, "invalid_request", "before must be an activity id, got %q", v)
+			return newError(http.StatusUnprocessableEntity, "invalid_request", "before must be an activity's seq, got %q", v)
 		}
 	}
 	list, err := ledger.Activities(r.Context(), s.cfg.Pool, r.PathValue("account"), before, limit)
@@ -184,7 +185,7 @@ func (s *Server) activities(w http.ResponseWriter, r *http.Request) error {
 	}
 	out := make([]activityJSON, len(list))
 	for i, a := range list {
-		out[i] = activityJSON{ID: a.EntryID, Type: string(a.Kind), CreatedAt: a.CreatedAt, Details: a.Metadata}
+		out[i] = activityJSON{ID: a.EntryID, Seq: a.Seq, Type: string(a.Kind), CreatedAt: a.CreatedAt, Details: a.Metadata}
 		for _, c := range a.Changes {
 			out[i].Changes = append(out[i].Changes, changeJSON{string(c.Asset), c.Amount})
 		}

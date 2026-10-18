@@ -184,7 +184,7 @@ paths:
         - $ref: "#/components/parameters/Account"
         - name: before
           in: query
-          description: The id of the last activity of the previous page.
+          description: The seq of the last activity of the previous page.
           schema: { type: integer, minimum: 1 }
         - $ref: "#/components/parameters/Limit"
       responses:
@@ -425,7 +425,12 @@ components:
     Activity:
       type: object
       properties:
-        id: { type: integer }
+        id: { type: integer, description: The journal entry's id. }
+        seq:
+          type: integer
+          description: |
+            The account's number for this activity, in commit order: one that
+            commits later always has a higher seq, so pages can't skip it.
         type: { type: string, enum: [deposit, withdrawal, deposit_return, withdrawal_return, trade_fill, reversal, deficit] }
         created_at: { type: string, format: date-time }
         details:

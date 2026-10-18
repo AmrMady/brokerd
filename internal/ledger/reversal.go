@@ -83,6 +83,9 @@ func ReverseEntry(ctx context.Context, tx pgx.Tx, entryID int64, reason string) 
 	if err != nil {
 		return Entry{}, fmt.Errorf("insert reversal of entry %d: %w", entryID, err)
 	}
+	if err = recordActivity(ctx, tx, pending.id, lines); err != nil {
+		return Entry{}, err
+	}
 
 	var (
 		cash      int64

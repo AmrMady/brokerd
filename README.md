@@ -168,8 +168,15 @@ Some notes on how it works:
 - Accounts are active, restricted or closed. A restricted account can still
   receive deposits and settle orders it already placed, but can't withdraw or
   place new holds. Closing needs every balance and hold at zero, and every
-  status change is recorded with a reason. Writes take a shared lock on the
-  account row first, so a close waits for postings in flight.
+  status change is recorded with a reason.
+- Every write locks its account's row first (`FOR NO KEY UPDATE`) and holds
+  it until commit, so one account's writes go one at a time and can't
+  deadlock with each other, and a close waits for postings in flight.
+  Different accounts still write in parallel. Each entry also takes the
+  account's next activity number from that row, so the numbers follow
+  commit order, and paging through activity, or polling it for what's new,
+  can't skip an entry that committed late. Entry ids can't do that: they're
+  taken before the locks.
 - A hold reserves cash or shares for an open order (`available = balance -
   held`). Each fill takes its cost out of the hold with a conditional update,
   so concurrent fills queue on the hold and can't use more than is left. What

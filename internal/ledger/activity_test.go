@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -22,7 +23,7 @@ func TestActivities(t *testing.T) {
 
 	page1, err := ledger.Activities(l.ctx, l.pool, alice, 0, 2)
 	noErr(t, err)
-	page2, err := ledger.Activities(l.ctx, l.pool, alice, page1[len(page1)-1].EntryID, 2)
+	page2, err := ledger.Activities(l.ctx, l.pool, alice, page1[len(page1)-1].Seq, 2)
 	noErr(t, err)
 	var got []string
 	for _, a := range append(page1, page2...) {
@@ -39,6 +40,82 @@ func TestActivities(t *testing.T) {
 
 	_, err = ledger.Activities(l.ctx, l.pool, alice, 0, ledger.MaxPageSize+1)
 	wantErr(t, err, ledger.ErrInvalid)
+}
+
+// An entry that commits after a page of activity was read is newer than
+// everything on that page, so a client that pages back from the newest
+// activity, and then asks for anything newer, never misses one. Here a fill
+// is held up partway, after its entry was created, while a deposit after it
+// commits.
+func TestActivitiesFollowCommitOrder(t *testing.T) {
+	t.Parallel()
+	l := newTestLedger(t)
+	alice := l.openAccount(t)
+	l.mustDeposit(t, "d1", alice, "1000")
+	h := l.mustHold(t, "h1", alice, ledger.USD, "100")
+
+	blocker, err := l.pool.Begin(l.ctx)
+	noErr(t, err)
+	defer func() { _ = blocker.Rollback(l.ctx) }() //nolint:errcheck // rolled back below already
+	_, err = blocker.Exec(l.ctx, `SELECT id FROM holds WHERE id = $1 FOR UPDATE`, h.ID)
+	noErr(t, err)
+	filled := make(chan error, 1)
+	go func() {
+		_, settleErr := l.settle(ledger.Fill{
+			ID: "f1", HoldID: h.ID, AccountID: alice, Symbol: "AAPL", Side: ledger.Buy,
+			Quantity: dec("1"), Price: dec("100"), Fee: dec("0"),
+		})
+		filled <- settleErr
+	}()
+	l.waitForLockWaits(t, 1)
+	deposited := make(chan error, 1)
+	go func() {
+		_, depositErr := l.deposit("d2", alice, "5")
+		deposited <- depositErr
+	}()
+	select {
+	case err = <-deposited:
+		noErr(t, err)
+	case <-time.After(200 * time.Millisecond): // it waits for the fill
+	}
+
+	seen, err := ledger.Activities(l.ctx, l.pool, alice, 0, 10)
+	noErr(t, err)
+	noErr(t, blocker.Rollback(l.ctx))
+	noErr(t, <-filled)
+	if len(deposited) > 0 {
+		noErr(t, <-deposited)
+	}
+	all, err := ledger.Activities(l.ctx, l.pool, alice, 0, 10)
+	noErr(t, err)
+	newest := cursor(seen[0])
+	for _, a := range all {
+		if cursor(a) <= newest && !slices.ContainsFunc(seen, func(s ledger.Activity) bool { return s.EntryID == a.EntryID }) {
+			t.Errorf("%s entry %d committed after the first read, but is older than what it showed", a.Kind, a.EntryID)
+		}
+	}
+}
+
+func cursor(a ledger.Activity) int64 { return a.Seq }
+
+// waitForLockWaits waits until n of the test database's connections are
+// waiting for a lock.
+func (l testLedger) waitForLockWaits(t *testing.T, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var waiting int
+		noErr(t, l.pool.QueryRow(l.ctx, `
+			SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting))
+		if waiting >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d connections waiting for a lock, want %d", waiting, n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // Every posting writes an entry_posted event in its own transaction, keyed

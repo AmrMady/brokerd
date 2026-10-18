@@ -158,9 +158,9 @@ func scanStatusChange(row pgx.CollectableRow) (StatusChange, error) {
 	return c, err
 }
 
-// lockAccountForUpdate takes the exclusive lock status changes need. It waits
-// for writes holding the shared lock (see lockAccount), so balances read
-// afterwards can't change until the transaction ends.
+// lockAccountForUpdate takes the lock status changes need. It waits for
+// writes in flight (see lockAccount), so balances read afterwards can't
+// change until the transaction ends.
 func lockAccountForUpdate(ctx context.Context, tx pgx.Tx, id string) (Account, error) {
 	if err := validateCustomer(id); err != nil {
 		return Account{}, err
@@ -188,14 +188,17 @@ func changeStatus(ctx context.Context, tx pgx.Tx, a Account, to AccountStatus, r
 		a.ID, a.Status, to, reason), a.ID)
 }
 
-// lockAccount takes a shared lock on a customer account and returns its
-// status. Writes take it before any other lock and hold it until commit, so
-// status changes wait for writes in flight and later writes see the new
-// status.
+// lockAccount locks a customer account's row and returns its status. Writes
+// take it before any other lock on the account and hold it until commit, so
+// one account's writes go one at a time and can't deadlock with each other,
+// its entries are numbered in commit order (see recordActivity), status
+// changes wait for writes in flight, and later writes see the new status.
+// FOR NO KEY UPDATE, rather than FOR UPDATE, still lets rows that reference
+// the account be inserted meanwhile.
 func lockAccount(ctx context.Context, tx pgx.Tx, id string) (AccountStatus, error) {
 	var status AccountStatus
 	err := tx.QueryRow(ctx, `
-		SELECT status FROM accounts WHERE id = $1 AND kind = 'customer' FOR SHARE`, id).Scan(&status)
+		SELECT status FROM accounts WHERE id = $1 AND kind = 'customer' FOR NO KEY UPDATE`, id).Scan(&status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", fmt.Errorf("%w: %s", ErrAccountNotFound, id)
 	}
