@@ -101,7 +101,10 @@ func (e *Engine) match(ctx context.Context, symbol ledger.Asset) {
 // fillResting fills a resting order at price, unless a cancel or an expiry
 // got to it first.
 func (e *Engine) fillResting(ctx context.Context, symbol ledger.Asset, id string, price decimal.Decimal) error {
-	closed := false
+	var (
+		closed bool
+		filled orders.Order
+	)
 	err := pgx.BeginFunc(ctx, e.cfg.Pool, func(tx pgx.Tx) error {
 		o, err := orders.Lock(ctx, tx, id)
 		if err != nil {
@@ -111,7 +114,7 @@ func (e *Engine) fillResting(ctx context.Context, symbol ledger.Asset, id string
 			closed = true
 			return nil
 		}
-		if _, err = e.fill(ctx, tx, o, price); err != nil {
+		if filled, err = e.fill(ctx, tx, o, price); err != nil {
 			return err
 		}
 		closed = true
@@ -119,6 +122,9 @@ func (e *Engine) fillResting(ctx context.Context, symbol ledger.Asset, id string
 	})
 	if closed {
 		e.unbook(symbol, id)
+	}
+	if err == nil && filled.Status == orders.Filled {
+		e.cfg.ObserveFill(max(0, filled.ClosedAt.Sub(filled.CreatedAt)))
 	}
 	return err
 }

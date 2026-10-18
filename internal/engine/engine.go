@@ -47,6 +47,11 @@ type Config struct {
 	ExpiryInterval time.Duration
 	Now            func() time.Time
 	Logger         *slog.Logger
+	// ObserveFill, if set, gets how long each order took from being
+	// placed to filling, and ObservePost how long each fill took to post
+	// to the ledger.
+	ObserveFill func(time.Duration)
+	ObservePost func(time.Duration)
 }
 
 // Engine places, fills, cancels and expires orders. Its methods are safe to
@@ -96,6 +101,12 @@ func New(ctx context.Context, cfg Config) (*Engine, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)
 	}
+	if cfg.ObserveFill == nil {
+		cfg.ObserveFill = func(time.Duration) {}
+	}
+	if cfg.ObservePost == nil {
+		cfg.ObservePost = func(time.Duration) {}
+	}
 
 	e := &Engine{cfg: cfg, seed: maphash.MakeSeed(), books: map[ledger.Asset]*book{}}
 	for range cfg.Workers {
@@ -139,10 +150,15 @@ func (e *Engine) Place(ctx context.Context, r orders.Request) (orders.Order, err
 			orders.ErrInvalid, r.Symbol, scale, r.Quantity)
 	}
 
-	var placed orders.Order
+	var (
+		placed  orders.Order
+		created bool
+		began   = time.Now()
+	)
 	err = pgx.BeginFunc(ctx, e.cfg.Pool, func(tx pgx.Tx) error {
-		o, created, txErr := orders.Create(ctx, tx, r)
-		if txErr != nil || !created {
+		var o orders.Order
+		var txErr error
+		if o, created, txErr = orders.Create(ctx, tx, r); txErr != nil || !created {
 			placed = o
 			return txErr
 		}
@@ -152,8 +168,11 @@ func (e *Engine) Place(ctx context.Context, r orders.Request) (orders.Order, err
 	if err != nil {
 		return orders.Order{}, err
 	}
-	if placed.Open() {
+	switch {
+	case placed.Open():
 		e.rest(placed)
+	case created && placed.Status == orders.Filled:
+		e.cfg.ObserveFill(time.Since(began))
 	}
 	return placed, nil
 }
@@ -278,6 +297,7 @@ func (e *Engine) holdAmount(o orders.Order, ask decimal.Decimal) decimal.Decimal
 // so the same order can't fill twice.
 func (e *Engine) fill(ctx context.Context, tx pgx.Tx, o orders.Order, price decimal.Decimal) (orders.Order, error) {
 	session := e.cfg.Calendar.Session(e.cfg.Now())
+	began := time.Now()
 	entry, err := ledger.SettleFill(ctx, tx, ledger.Fill{
 		ID:         "fill:" + o.ID,
 		HoldID:     o.HoldID,
@@ -293,6 +313,7 @@ func (e *Engine) fill(ctx context.Context, tx pgx.Tx, o orders.Order, price deci
 	if err != nil {
 		return o, err
 	}
+	e.cfg.ObservePost(time.Since(began))
 	hold, err := ledger.HoldByID(ctx, tx, o.HoldID)
 	if err != nil {
 		return o, err

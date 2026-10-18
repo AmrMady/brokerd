@@ -284,6 +284,24 @@ func TestServeWithAPI(t *testing.T) {
 	if status != http.StatusOK || field(got, "cash", "balance") != "500" {
 		t.Errorf("account: %d %v", status, got)
 	}
+	req, err := http.NewRequestWithContext(t.Context(), "GET", base+"/metrics", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scraped, err := io.ReadAll(resp.Body)
+	if closeErr := resp.Body.Close(); err != nil || closeErr != nil {
+		t.Fatal(err, closeErr)
+	}
+	for _, name := range []string{"brokerd_marketdata_events_total", "brokerd_ledger_post_seconds_count 1", `route="POST /v1/accounts"`} {
+		if !strings.Contains(string(scraped), name) {
+			t.Errorf("metrics have no %s", name)
+		}
+	}
+
 	// The stream is mounted on the API server.
 	conn := dial(t, s.url)
 	subscribe(t, conn, `{"action":"subscribe","quotes":["AAPL"]}`)
@@ -291,7 +309,7 @@ func TestServeWithAPI(t *testing.T) {
 	closed := drain(conn)
 
 	s.stop()
-	if err := s.wait(t); err != nil {
+	if err = s.wait(t); err != nil {
 		t.Errorf("serve returned %v", err)
 	}
 	<-closed

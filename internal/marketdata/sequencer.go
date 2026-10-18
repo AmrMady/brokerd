@@ -14,11 +14,12 @@ type Sequencer struct {
 	next Handler
 	last map[string]uint64
 
-	gaps, missed, stale atomic.Uint64
+	events, gaps, missed, stale atomic.Uint64
 }
 
 // SequenceStats counts what a Sequencer has seen.
 type SequenceStats struct {
+	Events uint64 // events passed on
 	Gaps   uint64 // events that skipped ahead
 	Missed uint64 // sequence numbers those events skipped
 	Stale  uint64 // events dropped as duplicates or out of order
@@ -45,7 +46,7 @@ func (s *Sequencer) HandleQuote(q Quote) {
 
 // Stats returns the counts so far.
 func (s *Sequencer) Stats() SequenceStats {
-	return SequenceStats{Gaps: s.gaps.Load(), Missed: s.missed.Load(), Stale: s.stale.Load()}
+	return SequenceStats{Events: s.events.Load(), Gaps: s.gaps.Load(), Missed: s.missed.Load(), Stale: s.stale.Load()}
 }
 
 func (s *Sequencer) accept(symbol string, seq uint64) bool {
@@ -60,5 +61,6 @@ func (s *Sequencer) accept(symbol string, seq uint64) bool {
 		s.missed.Add(seq - last - 1)
 	}
 	s.last[symbol] = seq
+	s.events.Add(1)
 	return true
 }

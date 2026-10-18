@@ -91,6 +91,7 @@ func TestSequencer(t *testing.T) {
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("passed on %q, want %q", got, tt.want)
 			}
+			tt.stats.Events = uint64(len(tt.want))
 			if s.Stats() != tt.stats {
 				t.Errorf("stats = %+v, want %+v", s.Stats(), tt.stats)
 			}
@@ -113,8 +114,8 @@ func TestSequencerStatsWhileRunning(t *testing.T) {
 		}
 	})
 	for range 100 {
-		if stats := s.Stats(); stats != (marketdata.SequenceStats{}) {
-			t.Errorf("stats = %+v for a feed in sequence, want zeros", stats)
+		if stats := s.Stats(); stats.Gaps != 0 || stats.Missed != 0 || stats.Stale != 0 {
+			t.Errorf("stats = %+v for a feed in sequence, want no gaps", stats)
 		}
 	}
 	wg.Wait()

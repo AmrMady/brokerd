@@ -54,6 +54,7 @@ func (s *Server) transfer(w http.ResponseWriter, r *http.Request,
 		key = rand.Text()
 	}
 	var t ledger.Transfer
+	began := time.Now()
 	err := pgx.BeginFunc(r.Context(), s.cfg.Pool, func(tx pgx.Tx) error {
 		var err error
 		t, err = request(r.Context(), tx, ledger.CashTransfer{
@@ -68,6 +69,7 @@ func (s *Server) transfer(w http.ResponseWriter, r *http.Request,
 	if err != nil {
 		return err
 	}
+	s.cfg.ObservePost(time.Since(began))
 	writeJSON(w, http.StatusCreated, transferOf(t))
 	return nil
 }

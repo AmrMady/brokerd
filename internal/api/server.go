@@ -30,6 +30,10 @@ type Config struct {
 	Quotes portfolio.Quotes
 	Bars   Bars
 	Logger *slog.Logger
+	// ObserveRequest, if set, gets each request's route pattern, status
+	// and duration; ObservePost how long each transfer took to post.
+	ObserveRequest func(route string, status int, d time.Duration)
+	ObservePost    func(time.Duration)
 }
 
 // Bars gives the most recent bars of a symbol.
@@ -52,6 +56,12 @@ const maxBody = 1 << 20
 func New(cfg Config) *Server {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)
+	}
+	if cfg.ObserveRequest == nil {
+		cfg.ObserveRequest = func(string, int, time.Duration) {}
+	}
+	if cfg.ObservePost == nil {
+		cfg.ObservePost = func(time.Duration) {}
 	}
 	s := &Server{cfg: cfg, mux: http.NewServeMux()}
 	s.mux.HandleFunc("GET /healthz", s.healthz)
@@ -120,8 +130,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				s.writeError(rec, r, fmt.Errorf("panic: %v", p))
 			}
 		}
+		took := time.Since(began)
+		s.cfg.ObserveRequest(r.Pattern, rec.status, took)
 		s.cfg.Logger.Info("request", "request_id", id, "method", r.Method, "route", r.Pattern,
-			"status", rec.status, "bytes", rec.bytes, "duration", time.Since(began))
+			"status", rec.status, "bytes", rec.bytes, "duration", took)
 	}()
 	r.Body = http.MaxBytesReader(rec, r.Body, maxBody)
 	s.mux.ServeHTTP(rec, r)

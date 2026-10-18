@@ -21,6 +21,7 @@ import (
 	"github.com/AmrMady/brokerd/internal/engine"
 	"github.com/AmrMady/brokerd/internal/ledger"
 	"github.com/AmrMady/brokerd/internal/marketdata"
+	"github.com/AmrMady/brokerd/internal/metrics"
 	"github.com/AmrMady/brokerd/internal/postgres"
 	"github.com/AmrMady/brokerd/internal/stream"
 )
@@ -138,8 +139,13 @@ func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.L
 	}
 	quotes := &marketdata.QuoteCache{}
 	handlers := marketdata.Handlers{quotes}
+	reg := metrics.New()
+	reg.Stream(hub)
 
-	apiCfg := api.Config{Quotes: quotes, Bars: bars, Logger: logger}
+	apiCfg := api.Config{
+		Quotes: quotes, Bars: bars, Logger: logger,
+		ObserveRequest: reg.ObserveRequest, ObservePost: reg.ObservePost,
+	}
 	var eng *engine.Engine
 	if cfg.databaseURL != "" {
 		var pool *pgxpool.Pool
@@ -147,7 +153,7 @@ func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.L
 			return err
 		}
 		defer pool.Close()
-		if eng, err = startEngine(ctx, cfg, pool, quotes, logger); err != nil {
+		if eng, err = startEngine(ctx, cfg, pool, quotes, logger, reg); err != nil {
 			return err
 		}
 		if err = api.MaintainIdempotency(ctx, pool, time.Now()); err != nil {
@@ -161,7 +167,9 @@ func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.L
 	}
 	apiSrv := api.New(apiCfg)
 	apiSrv.Handle("GET /v1/stream", hub)
+	apiSrv.Handle("GET /metrics", reg.Handler())
 	sequencer := marketdata.NewSequencer(append(handlers, seconds, minutes, hub))
+	reg.MarketData(sequencer, map[string]*marketdata.Aggregator{"1s": seconds, "1m": minutes})
 
 	srv := &http.Server{
 		Handler:           apiSrv,
@@ -247,7 +255,9 @@ func maintain(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) {
 
 // startEngine makes sure the feed's symbols can be traded and starts the
 // engine with the market calendar.
-func startEngine(ctx context.Context, cfg serveConfig, pool *pgxpool.Pool, quotes engine.Quotes, logger *slog.Logger) (*engine.Engine, error) {
+func startEngine(ctx context.Context, cfg serveConfig, pool *pgxpool.Pool, quotes engine.Quotes, logger *slog.Logger,
+	reg *metrics.Registry,
+) (*engine.Engine, error) {
 	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		for _, symbol := range cfg.symbols {
 			if _, err := ledger.AssetScale(ctx, tx, ledger.Asset(symbol)); err == nil {
@@ -266,5 +276,8 @@ func startEngine(ctx context.Context, cfg serveConfig, pool *pgxpool.Pool, quote
 	if err != nil {
 		return nil, err
 	}
-	return engine.New(ctx, engine.Config{Pool: pool, Quotes: quotes, Calendar: cal, Logger: logger})
+	return engine.New(ctx, engine.Config{
+		Pool: pool, Quotes: quotes, Calendar: cal, Logger: logger,
+		ObserveFill: reg.ObserveFill, ObservePost: reg.ObservePost,
+	})
 }
