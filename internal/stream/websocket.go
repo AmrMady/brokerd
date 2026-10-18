@@ -16,6 +16,10 @@ import (
 // Messages per WebSocket frame. A frame is a JSON array of messages.
 const maxBatch = 256
 
+// sessionHeader carries the hub's session in the WebSocket handshake, where,
+// unlike a message, it can't be dropped.
+const sessionHeader = "Stream-Session"
+
 // errLagged is the cause of a write or ping that took longer than MaxLag.
 // When one times out the connection is closed, and the reader can see that
 // and cancel the stream's context first, so the timeout is told apart by its
@@ -29,7 +33,8 @@ var errLagged = errors.New("client took too long")
 // or "unsubscribe" with the same fields, and gets back frames that are JSON
 // arrays of messages: a "subscription" message listing its subscriptions
 // after each request, an "error" message for a bad one, and "trade",
-// "quote" and "bar" messages.
+// "quote" and "bar" messages. The handshake's Stream-Session header has the
+// hub's Session.
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c, err := h.Connect()
 	if err != nil {
@@ -37,6 +42,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer c.Close()
+	w.Header().Set(sessionHeader, h.session)
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return // Accept has replied

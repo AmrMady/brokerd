@@ -167,6 +167,27 @@ func TestWebSocketPingsIdleClients(t *testing.T) {
 	})
 }
 
+// The handshake names the hub's session, which differs between hubs.
+func TestWebSocketSession(t *testing.T) {
+	t.Parallel()
+	var sessions []string
+	for range 2 {
+		h, url := serve(t, stream.Config{})
+		conn, resp, err := websocket.Dial(t.Context(), url, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		closeConn(t, conn)
+		if got := resp.Header.Get("Stream-Session"); got == "" || got != h.Session() {
+			t.Errorf("Stream-Session header %q, want the hub's session %q", got, h.Session())
+		}
+		sessions = append(sessions, h.Session())
+	}
+	if sessions[0] == sessions[1] {
+		t.Errorf("two hubs have the same session %q", sessions[0])
+	}
+}
+
 func TestWebSocketHubClose(t *testing.T) {
 	t.Parallel()
 	h, err := stream.NewHub(stream.Config{})
@@ -199,5 +220,12 @@ func TestWebSocketHubClose(t *testing.T) {
 		if closeErr := resp.Body.Close(); closeErr != nil {
 			t.Error(closeErr)
 		}
+	}
+}
+
+func closeConn(t *testing.T, conn *websocket.Conn) {
+	t.Helper()
+	if err := conn.CloseNow(); err != nil && !errors.Is(err, net.ErrClosed) {
+		t.Error(err)
 	}
 }

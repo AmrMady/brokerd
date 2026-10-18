@@ -43,6 +43,9 @@ func TestHubSendsSubscribedEvents(t *testing.T) {
 		`{"type":"bar","symbol":"AAPL","timeframe":"1m","start":"2026-10-16T13:30:00Z","open":"10","high":"12","low":"9","close":"11","volume":"7.5","trades":4}`,
 	)
 	wantNothing(t, other)
+	if s := h.Stats(); s.Subscriptions != 3 {
+		t.Errorf("stats = %+v, want 3 subscriptions", s)
+	}
 }
 
 func TestHubUnsubscribe(t *testing.T) {
@@ -70,8 +73,8 @@ func TestHubUnsubscribe(t *testing.T) {
 		`{"type":"subscription","trades":["MSFT"],"quotes":[],"bars":[]}`,
 		tradeJSON("MSFT", 1),
 	)
-	if s := h.Stats(); s.Clients != 1 {
-		t.Errorf("stats = %+v, want 1 client", s)
+	if s := h.Stats(); s.Clients != 1 || s.Subscriptions != 1 {
+		t.Errorf("stats = %+v, want 1 client with 1 subscription", s)
 	}
 }
 

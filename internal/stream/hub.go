@@ -3,6 +3,7 @@ package stream
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -86,22 +87,25 @@ type topic struct {
 //
 // Each event is encoded once, however many clients get it.
 type Hub struct {
-	cfg Config
+	cfg     Config
+	session string
 
-	mu      sync.RWMutex
-	topics  map[topic]map[*Client]struct{}
-	clients map[*Client]struct{}
-	closed  bool
-	active  sync.WaitGroup // clients not yet closed
+	mu            sync.RWMutex
+	topics        map[topic]map[*Client]struct{}
+	clients       map[*Client]struct{}
+	subscriptions int
+	closed        bool
+	active        sync.WaitGroup // clients not yet closed
 
 	dropped, disconnected atomic.Uint64
 }
 
 // Stats counts what a Hub has done.
 type Stats struct {
-	Clients      int
-	Dropped      uint64 // messages dropped from full client queues
-	Disconnected uint64 // clients disconnected for being too slow
+	Clients       int
+	Subscriptions int    // channel and symbol pairs, across clients
+	Dropped       uint64 // messages dropped from full client queues
+	Disconnected  uint64 // clients disconnected for being too slow
 }
 
 // NewHub returns a Hub with the given config.
@@ -112,9 +116,17 @@ func NewHub(cfg Config) (*Hub, error) {
 	}
 	return &Hub{
 		cfg:     cfg,
+		session: rand.Text(),
 		topics:  map[topic]map[*Client]struct{}{},
 		clients: map[*Client]struct{}{},
 	}, nil
+}
+
+// Session identifies this hub for as long as it runs. Events from a hub keep
+// their feed's sequence numbers, which start over when the hub's process
+// does, so numbers from different sessions can't be compared.
+func (h *Hub) Session() string {
+	return h.session
 }
 
 // HandleTrade implements marketdata.Handler.
@@ -201,9 +213,12 @@ func (h *Hub) Close(ctx context.Context) error {
 // Stats returns the counts so far.
 func (h *Hub) Stats() Stats {
 	h.mu.RLock()
-	clients := len(h.clients)
+	clients, subscriptions := len(h.clients), h.subscriptions
 	h.mu.RUnlock()
-	return Stats{Clients: clients, Dropped: h.dropped.Load(), Disconnected: h.disconnected.Load()}
+	return Stats{
+		Clients: clients, Subscriptions: subscriptions,
+		Dropped: h.dropped.Load(), Disconnected: h.disconnected.Load(),
+	}
 }
 
 // Client is one subscriber. Its queue is a ring buffer that never grows:
@@ -253,6 +268,7 @@ func (c *Client) Subscribe(s Subscriptions) error {
 			continue
 		}
 		c.subs[t] = struct{}{}
+		h.subscriptions++
 		if h.topics[t] == nil {
 			h.topics[t] = map[*Client]struct{}{}
 		}
@@ -284,7 +300,11 @@ func (c *Client) Unsubscribe(s Subscriptions) error {
 
 // unsubscribe is called with hub.mu held.
 func (c *Client) unsubscribe(t topic) {
+	if _, ok := c.subs[t]; !ok {
+		return
+	}
 	delete(c.subs, t)
+	c.hub.subscriptions--
 	if clients := c.hub.topics[t]; clients != nil {
 		delete(clients, c)
 		if len(clients) == 0 {

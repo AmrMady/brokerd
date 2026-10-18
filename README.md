@@ -16,12 +16,12 @@ Done:
   account history and a reconcile command.
 - Market data: a seeded random-walk simulator and CSV replay, per-symbol
   sequence checks, a lock-free latest-quote cache, 1s and 1m OHLCV bars by
-  event time, and a WebSocket stream that drops and then disconnects slow
-  clients.
+  event time, a WebSocket stream that drops and then disconnects slow
+  clients, and a relay that streams from another brokerd.
 
 Planned:
 
-- Market data: a relay feed from another brokerd, and a command that runs it all
+- Market data: a command that runs it all
 - Paper trading: market and limit orders filled against live quotes
 - REST API, metrics, OpenAPI spec
 - Transactional outbox to Kafka
@@ -171,7 +171,9 @@ The hub streams trades, quotes and bars over a WebSocket. A client sends
 ```
 
 Prices and sizes are strings, so they keep their exact decimal value. A
-subscription's confirmation is always queued before its first event.
+subscription's confirmation is always queued before its first event. The
+handshake's `Stream-Session` header names the hub's session: events keep
+their feed's sequence numbers, which start over when the hub restarts.
 
 The hub runs on the feed's goroutine and must never block it, so a slow
 client can only hurt itself:
@@ -187,6 +189,16 @@ client can only hurt itself:
   10s and which it couldn't keep up with anyway.
 - Shutting down sends every client a "going away" close and waits for each
   connection to finish. The tests check for leaked goroutines with goleak.
+
+A relay is a feed that subscribes to another brokerd's stream, so hubs can
+be chained: one reads the real feed and relays closer to the clients fan
+it out further. Events keep their upstream sequence numbers, so what the
+relay misses while reconnecting, or what the upstream hub drops because
+the relay fell behind, shows up downstream as sequence gaps. When the
+upstream session changes, the relay shifts the new numbers past the ones it
+already passed on. It reconnects with backoff (1s doubling to a minute,
+reset after a connection that streamed) and pings to catch a dead
+connection.
 
 Publishing a trade to 100 subscribers (1,000 clients each subscribed to 10
 of 100 symbols) takes about 29 µs, or 3.4M messages/s, on an Apple M4 Pro.
