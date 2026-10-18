@@ -323,8 +323,12 @@ goroutine. Each symbol's events carry a sequence number.
   watermark passes its end plus a grace period, and its bars go out sorted
   by symbol. Trades that arrive out of order within the grace period are
   placed by their own time (open and close follow event time, not arrival);
-  trades for a closed window are dropped and counted. A 1s aggregator
-  handles about 13M trades/s on one core.
+  trades for a closed window are dropped and counted. If the feed goes
+  quiet, a one-second tick moves event time on with the wall clock from
+  when it stopped, so the last bars still close; on shutdown, the bars
+  still open are flushed. A 1s aggregator handles about 11M trades/s on
+  one core, with an uncontended mutex since the tick runs on its own
+  goroutine.
 
 ## Streaming
 

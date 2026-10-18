@@ -136,6 +136,30 @@ func TestAggregatorFlush(t *testing.T) {
 	}
 }
 
+// When the feed goes quiet, Tick moves event time on with the wall clock, so
+// the last bars still close, grace after their windows end. Only the time
+// since the feed went quiet counts, so a replay of old events works too.
+func TestAggregatorClosesBarsWhenTheFeedIsQuiet(t *testing.T) {
+	t.Parallel()
+	a, r := newAggregator(t, time.Second, 500*time.Millisecond)
+	wall := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	a.Tick(wall) // nothing yet
+	a.HandleTrade(tradeAt("AAPL", 200, "10", "1"))
+	a.Tick(wall.Add(time.Second)) // the feed just went quiet
+	a.Tick(wall.Add(2 * time.Second))
+	wantRows(t, "bars a second into the quiet", r.take(), nil)
+
+	a.Tick(wall.Add(2300 * time.Millisecond)) // 13:30:01.5 in event time
+	wantRows(t, "bars once the grace is up", r.take(), []string{"AAPL 13:30:00/1s O10 H10 L10 C10 V1 n1"})
+
+	// Events start again, and so does waiting for quiet.
+	a.HandleTrade(tradeAt("AAPL", 1600, "11", "1"))
+	a.Tick(wall.Add(10 * time.Second))
+	wantRows(t, "bars right after the feed came back", r.take(), nil)
+	a.Tick(wall.Add(12 * time.Second))
+	wantRows(t, "bars after it went quiet again", r.take(), []string{"AAPL 13:30:01/1s O11 H11 L11 C11 V1 n1"})
+}
+
 // A trade can be too late for its 1s bar and still be in time for its 1m bar.
 func TestAggregatorIntervalsAreSeparate(t *testing.T) {
 	t.Parallel()

@@ -259,6 +259,24 @@ func TestParseServe(t *testing.T) {
 	}
 }
 
+// Stopping flushes the bars still open, rather than losing them.
+func TestServeFlushesBarsWhenStopped(t *testing.T) {
+	t.Parallel()
+	s := startServe(t, serveConfig{feed: "sim", symbols: []string{"AAPL"}, rate: 1000, seed: 1})
+	conn := dial(t, s.url)
+	subscribe(t, conn, `{"action":"subscribe","trades":["AAPL"]}`)
+	readUntil(t, conn, "trade") // well before the first 1s bar closes
+	closed := drain(conn)
+	s.stop()
+	if err := s.wait(t); err != nil {
+		t.Fatal(err)
+	}
+	<-closed
+	if bars, ok := s.stopped(t)["bars"].(float64); !ok || bars < 2 {
+		t.Errorf("%v bars, want the open 1s and 1m bars flushed", bars)
+	}
+}
+
 // A keep-alive connection that sends nothing more is closed after the idle
 // timeout, rather than held open for good.
 func TestServeClosesIdleConnections(t *testing.T) {

@@ -205,6 +205,11 @@ func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.L
 	defer stopFeed()
 	fed := make(chan error, 1)
 	go func() { fed <- feed.Run(feedCtx, sequencer) }()
+	ticked := make(chan struct{})
+	go func() {
+		defer close(ticked)
+		tickBars(feedCtx, seconds, minutes)
+	}()
 	logger.Info("serving", "addr", ln.Addr().String(), "feed", cfg.feed, "symbols", cfg.symbols, "api", eng != nil)
 
 	feedEnded := false
@@ -212,8 +217,7 @@ func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.L
 	case err = <-fed:
 		feedEnded = true
 		if err == nil {
-			// The aggregators belong to the feed's goroutine until it has
-			// returned, so they're only flushed now.
+			// No more trades are coming, so the open bars are done.
 			seconds.Flush()
 			minutes.Flush()
 			logger.Info("feed ended")
@@ -234,10 +238,15 @@ func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.L
 	defer cancel()
 	err = errors.Join(err, srv.Shutdown(sctx))
 	stopFeed()
+	<-ticked
 	if !feedEnded {
 		if feedErr := <-fed; !errors.Is(feedErr, context.Canceled) {
 			err = errors.Join(err, feedErr)
 		}
+		// Send the open bars on, rather than lose them, while the hub and
+		// the bar store are still up.
+		seconds.Flush()
+		minutes.Flush()
 	}
 	stopEngine()
 	if engineErr, ok := <-engineDone; ok && !errors.Is(engineErr, context.Canceled) {
@@ -251,6 +260,22 @@ func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.L
 		"bars", s.Bars+m.Bars, "late_1s", s.Late, "late_1m", m.Late,
 		"dropped", h.Dropped, "disconnected", h.Disconnected)
 	return err
+}
+
+// tickBars lets bars close while the feed is quiet, until ctx is done.
+func tickBars(ctx context.Context, aggs ...*marketdata.Aggregator) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			for _, a := range aggs {
+				a.Tick(now)
+			}
+		}
+	}
 }
 
 // maintain keeps the idempotency partitions current, hourly, until ctx is

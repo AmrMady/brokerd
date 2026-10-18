@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -36,16 +37,23 @@ type BarHandler interface {
 // window that has closed is late: it's dropped and counted. Windows with no
 // trades have no bar.
 //
-// The Handle methods and Flush are called from the feed's goroutine only;
-// Stats can be called from any goroutine.
+// If the feed goes quiet, no event moves time on, so Tick, called on a
+// timer, does: while no events arrive, event time is taken to keep pace
+// with the wall clock from when they stopped.
+//
+// Its methods can be called from any goroutine.
 type Aggregator struct {
 	interval time.Duration
 	grace    time.Duration
 	out      BarHandler
 
+	mu           sync.Mutex
 	windows      []*window // open, oldest first
 	watermark    time.Time // the latest event time seen
 	closedBefore time.Time // windows starting before this have closed
+	fed          bool      // an event arrived since the last Tick
+	quietSince   time.Time // wall-clock time of the first Tick with no events
+	quietFrom    time.Time // the watermark then
 
 	bars, late atomic.Uint64
 }
@@ -80,6 +88,9 @@ func NewAggregator(interval, grace time.Duration, out BarHandler) (*Aggregator, 
 
 // HandleTrade adds t to its bar.
 func (a *Aggregator) HandleTrade(t Trade) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.fed = true
 	a.advance(t.Timestamp)
 	start := t.Timestamp.Truncate(a.interval)
 	if start.Before(a.closedBefore) {
@@ -117,11 +128,32 @@ func (a *Aggregator) HandleTrade(t Trade) {
 
 // HandleQuote moves event time forward, which can close windows.
 func (a *Aggregator) HandleQuote(q Quote) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.fed = true
 	a.advance(q.Timestamp)
 }
 
-// Flush closes every open window, for when the feed has ended.
+// Tick moves event time on by the wall-clock time since the feed went
+// quiet, if no event has arrived since the last Tick, so the last bars
+// still close. Call it every second or so.
+func (a *Aggregator) Tick(now time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.watermark.IsZero() {
+		return
+	}
+	if a.fed || a.quietSince.IsZero() {
+		a.fed, a.quietSince, a.quietFrom = false, now, a.watermark
+		return
+	}
+	a.advance(a.quietFrom.Add(now.Sub(a.quietSince)))
+}
+
+// Flush closes every open window, for when the feed has stopped.
 func (a *Aggregator) Flush() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	for _, w := range a.windows {
 		a.emit(w)
 		a.closedBefore = w.start.Add(a.interval)
