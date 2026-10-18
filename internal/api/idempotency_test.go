@@ -20,17 +20,23 @@ import (
 )
 
 // testHandler counts its calls and answers with the count. It can be made
-// to fail, to find its client gone, or to wait until released.
+// to fail, to find its client gone, to run until its deadline, or to wait
+// until released.
 type testHandler struct {
 	calls    atomic.Int32
 	fail     atomic.Bool
 	canceled atomic.Bool
+	slow     atomic.Bool
 	started  chan struct{}
 	release  chan struct{}
 }
 
-func (h *testHandler) serve(w http.ResponseWriter, _ *http.Request) error {
+func (h *testHandler) serve(w http.ResponseWriter, r *http.Request) error {
 	n := h.calls.Add(1)
+	if h.slow.Load() {
+		<-r.Context().Done()
+		return r.Context().Err()
+	}
 	if h.started != nil {
 		h.started <- struct{}{}
 		<-h.release
@@ -45,13 +51,17 @@ func (h *testHandler) serve(w http.ResponseWriter, _ *http.Request) error {
 	return nil
 }
 
-func idempotentServer(t *testing.T, h *testHandler) (string, *pgxpool.Pool) {
+// idempotentServer serves h with the handler deadline, if one is given.
+func idempotentServer(t *testing.T, h *testHandler, deadline ...time.Duration) (string, *pgxpool.Pool) {
 	t.Helper()
 	pool := pgtest.NewPool(t)
 	if err := MaintainIdempotency(t.Context(), pool, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	s := New(Config{Pool: pool})
+	if len(deadline) > 0 {
+		s.handlerTimeout = deadline[0]
+	}
 	s.route("POST /things/{account}", s.idempotent(h.serve))
 	srv := httptest.NewServer(s)
 	t.Cleanup(srv.Close)
@@ -169,6 +179,37 @@ func TestIdempotentCanceled(t *testing.T) {
 	h.canceled.Store(false)
 	if status, body, _ := post(t, url+"/things/a", "k1", `{}`); status != http.StatusCreated || body != `{"call":2}` {
 		t.Errorf("retry after a canceled request: %d %s, want it run again", status, body)
+	}
+}
+
+// A handler has less time than its claim's lease, so a slow one is stopped,
+// and its claim given back, before another request could take the claim
+// over and run it a second time.
+func TestIdempotentHandlersHaveADeadline(t *testing.T) {
+	t.Parallel()
+	h := &testHandler{}
+	url, _ := idempotentServer(t, h, 50*time.Millisecond)
+	h.slow.Store(true)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", url+"/things/a", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Idempotency-Key", "k1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("slow handler: %v, want it stopped at its deadline", err)
+	}
+	if err = resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("slow handler: %d, want 503", resp.StatusCode)
+	}
+	h.slow.Store(false)
+	if status, body, _ := post(t, url+"/things/a", "k1", `{}`); status != http.StatusCreated || body != `{"call":2}` {
+		t.Errorf("retry after the deadline: %d %s, want it run again", status, body)
 	}
 }
 

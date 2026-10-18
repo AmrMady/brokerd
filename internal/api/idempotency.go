@@ -21,6 +21,8 @@ const (
 	keyRetention = 24 * time.Hour
 	// claimLease is how long a request can run before its key is taken
 	// to be abandoned, by a process that crashed, and can be claimed again.
+	// Handlers get half of it (Server.handlerTimeout), so one that's only
+	// slow stops, and gives its key back, before the lease is up.
 	claimLease = time.Minute
 )
 
@@ -72,7 +74,10 @@ func (s *Server) idempotent(h handlerFunc) handlerFunc {
 		}
 
 		rec := &bufferedResponse{header: http.Header{}, status: http.StatusOK}
-		if err = h(rec, r); err != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), s.handlerTimeout)
+		err = h(rec, r.WithContext(ctx))
+		cancel()
+		if err != nil {
 			s.writeError(rec, r, err)
 		}
 		// The request has had its effect by now, so it's answered even if

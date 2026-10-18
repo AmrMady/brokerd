@@ -43,6 +43,8 @@ func errorFor(err error) *apiError {
 		return e
 	case errors.Is(err, context.Canceled):
 		return newError(statusClientClosed, "canceled", "the request was canceled")
+	case errors.Is(err, context.DeadlineExceeded):
+		return newError(http.StatusServiceUnavailable, "timeout", "the request took too long; retry it")
 	case errors.Is(err, ledger.ErrAccountNotFound), errors.Is(err, orders.ErrNotFound),
 		errors.Is(err, ledger.ErrTransferNotFound):
 		return newError(http.StatusNotFound, "not_found", "%s", err)

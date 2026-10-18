@@ -318,7 +318,7 @@ components:
         404 not_found, 409 order_not_open, idempotency_conflict or
         request_in_progress, 413 too_large, 422 invalid_request,
         insufficient_funds, unsettled_funds or idempotency_key_reused,
-        500 internal.
+        500 internal, 503 timeout.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }

@@ -50,6 +50,9 @@ type Server struct {
 	routes   []string // patterns, for checking against the OpenAPI spec
 	draining atomic.Bool
 	inflight sync.WaitGroup // requests being handled, WebSockets included
+
+	// handlerTimeout is how long a request with an Idempotency-Key can run.
+	handlerTimeout time.Duration
 }
 
 // maxBody is the largest request body the API reads.
@@ -66,7 +69,7 @@ func New(cfg Config) *Server {
 	if cfg.ObservePost == nil {
 		cfg.ObservePost = func(time.Duration) {}
 	}
-	s := &Server{cfg: cfg, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, mux: http.NewServeMux(), handlerTimeout: claimLease / 2}
 	s.route("GET /healthz", func(w http.ResponseWriter, r *http.Request) error { s.healthz(w, r); return nil })
 	s.route("GET /readyz", func(w http.ResponseWriter, r *http.Request) error { s.readyz(w, r); return nil })
 	// Anything else gets the usual JSON error rather than the mux's text.

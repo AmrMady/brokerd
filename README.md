@@ -113,7 +113,9 @@ checks against the server's routes.
   `Idempotent-Replayed: true`. A retry while the first is still running gets
   409, and the same key with a different request gets 422. A 5xx, or a
   request whose client went away, isn't stored, so it can be retried. A
-  claim left by a crashed server can be taken over after a minute. Keys are
+  claim left by a crashed server can be taken over after a minute; a
+  handler only gets 30s, so one that's just slow stops with a 503 and gives
+  its key back first, rather than run twice. Keys are
   kept for a day in a table partitioned by day, so old keys go by dropping a
   partition. The key is also passed down as the ledger's idempotency key, or,
   hashed to fit, as an order's client order ID, so even a retry that runs
