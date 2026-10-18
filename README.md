@@ -497,8 +497,11 @@ go run ./cmd/brokerd serve -feed replay -file events.csv -speed 10
 DATABASE_URL= go run ./cmd/brokerd serve -feed relay -upstream ws://localhost:8080/v1/stream -addr :8081
 ```
 
-A replay serves until its file runs out, flushing its last bars. Other
-commands: `brokerd reconcile` checks the ledger, and `brokerd settle`
+A replay serves until its file runs out, flushing its last bars. Requests
+get `-read-timeout` and `-write-timeout` (30s each), and idle keep-alive
+connections are closed after `-idle-timeout` (2m); the stream clears its
+connection's deadlines, since it lasts as long as the client keeps up.
+Other commands: `brokerd reconcile` checks the ledger, and `brokerd settle`
 settles trades due today.
 
 The outbox publisher and a consumer, against Kafka from `docker compose up

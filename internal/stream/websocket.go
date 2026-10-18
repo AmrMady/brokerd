@@ -52,6 +52,14 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer c.Close()
+	// The server's read and write timeouts are for requests. A stream lasts
+	// as long as its client keeps up, which MaxLag and pings check, so its
+	// deadlines are cleared: http.Hijacker leaves that to the handler.
+	rc := http.NewResponseController(w)
+	if err = errors.Join(rc.SetReadDeadline(time.Time{}), rc.SetWriteDeadline(time.Time{})); err != nil &&
+		!errors.Is(err, http.ErrNotSupported) {
+		h.cfg.Logger.Debug("clear stream deadlines", "error", err)
+	}
 	w.Header().Set(sessionHeader, h.session)
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {

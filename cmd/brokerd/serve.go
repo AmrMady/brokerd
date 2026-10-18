@@ -42,6 +42,8 @@ type serveConfig struct {
 	speed       float64
 	upstream    string
 	grace       time.Duration
+
+	readTimeout, writeTimeout, idleTimeout time.Duration
 }
 
 func parseServe(args []string, output io.Writer) (serveConfig, error) {
@@ -60,6 +62,9 @@ func parseServe(args []string, output io.Writer) (serveConfig, error) {
 	fs.Float64Var(&cfg.speed, "speed", 1, "replay: 1 is real time, 10 is ten times faster, 0 is as fast as possible")
 	fs.StringVar(&cfg.upstream, "upstream", "", "relay: another brokerd's stream, like ws://core:8080/v1/stream")
 	fs.DurationVar(&cfg.grace, "grace", time.Second, "how long bars wait for late trades")
+	fs.DurationVar(&cfg.readTimeout, "read-timeout", 30*time.Second, "how long a request can take to arrive")
+	fs.DurationVar(&cfg.writeTimeout, "write-timeout", 30*time.Second, "how long a request can take to answer")
+	fs.DurationVar(&cfg.idleTimeout, "idle-timeout", 2*time.Minute, "how long a keep-alive connection can sit idle")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
@@ -172,9 +177,13 @@ func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.L
 	sequencer := marketdata.NewSequencer(append(handlers, seconds, minutes, hub))
 	reg.MarketData(sequencer, map[string]*marketdata.Aggregator{"1s": seconds, "1m": minutes})
 
+	// The stream clears these deadlines on its connections.
 	srv := &http.Server{
 		Handler:           apiSrv,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       cfg.readTimeout,
+		WriteTimeout:      cfg.writeTimeout,
+		IdleTimeout:       cfg.idleTimeout,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
 	served := make(chan error, 1)

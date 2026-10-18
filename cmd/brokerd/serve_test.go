@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -233,7 +234,8 @@ func TestServeRelaysAnotherServe(t *testing.T) {
 func TestParseServe(t *testing.T) {
 	t.Parallel()
 	cfg, err := parseServe(nil, io.Discard)
-	if err != nil || cfg.feed != "sim" || cfg.addr != ":8080" || len(cfg.symbols) != 5 || cfg.grace != time.Second {
+	if err != nil || cfg.feed != "sim" || cfg.addr != ":8080" || len(cfg.symbols) != 5 || cfg.grace != time.Second ||
+		cfg.readTimeout != 30*time.Second || cfg.writeTimeout != 30*time.Second || cfg.idleTimeout != 2*time.Minute {
 		t.Errorf("defaults: %+v, %v", cfg, err)
 	}
 	cfg, err = parseServe([]string{"-feed", "relay", "-upstream", "ws://core:8080/v1/stream", "-symbols", "AAPL,MSFT"}, io.Discard)
@@ -253,6 +255,63 @@ func TestParseServe(t *testing.T) {
 	}
 	if _, err = parseServe([]string{"-h"}, io.Discard); !errors.Is(err, flag.ErrHelp) {
 		t.Errorf("-h returned %v, want %v", err, flag.ErrHelp)
+	}
+}
+
+// A keep-alive connection that sends nothing more is closed after the idle
+// timeout, rather than held open for good.
+func TestServeClosesIdleConnections(t *testing.T) {
+	t.Parallel()
+	s := startServe(t, serveConfig{feed: "sim", symbols: []string{"AAPL"}, rate: 10, seed: 1, idleTimeout: 100 * time.Millisecond})
+	addr := strings.TrimSuffix(strings.TrimPrefix(s.url, "ws://"), "/v1/stream")
+	var (
+		conn net.Conn
+		err  error
+	)
+	for range 100 {
+		if conn, err = net.Dial("tcp", addr); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }() //nolint:errcheck // the server closed it
+	if _, err = io.WriteString(conn, "GET /healthz HTTP/1.1\r\nHost: brokerd\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	r := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(r, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = io.Copy(io.Discard, resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	if err = conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = r.ReadByte(); !errors.Is(err, io.EOF) {
+		t.Errorf("idle connection: read returned %v, want the server to close it", err)
+	}
+}
+
+// The request timeouts don't apply to the stream, which lasts as long as
+// the client keeps up.
+func TestServeStreamsPastTheRequestTimeouts(t *testing.T) {
+	t.Parallel()
+	s := startServe(t, serveConfig{
+		feed: "sim", symbols: []string{"AAPL"}, rate: 100, seed: 1,
+		readTimeout: 100 * time.Millisecond, writeTimeout: 100 * time.Millisecond,
+	})
+	conn := dial(t, s.url)
+	subscribe(t, conn, `{"action":"subscribe","quotes":["AAPL"]}`)
+	readUntil(t, conn, "subscription", "quote")
+	time.Sleep(300 * time.Millisecond)
+	readUntil(t, conn, "quote")
+	if err := conn.Close(websocket.StatusNormalClosure, ""); err != nil {
+		t.Error(err)
 	}
 }
 
