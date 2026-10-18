@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 
 	"github.com/AmrMady/brokerd/internal/ledger"
 	"github.com/AmrMady/brokerd/internal/orders"
@@ -96,7 +97,7 @@ func (s store) accepted(t *testing.T) orders.Order {
 	t.Helper()
 	o := s.create(t, s.request())
 	o, err := inTx(s, func(tx pgx.Tx) (orders.Order, error) {
-		return orders.Accept(s.ctx, tx, o.ID, s.hold, time.Time{})
+		return orders.Accept(s.ctx, tx, o.ID, s.hold, time.Time{}, decimal.Zero)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -123,7 +124,7 @@ func TestLifecycle(t *testing.T) {
 
 	expires := time.Date(2026, 10, 16, 20, 0, 0, 0, time.UTC)
 	o, err := inTx(s, func(tx pgx.Tx) (orders.Order, error) {
-		return orders.Accept(s.ctx, tx, o.ID, s.hold, expires)
+		return orders.Accept(s.ctx, tx, o.ID, s.hold, expires, decimal.Zero)
 	})
 	noErr(t, err)
 	if o.Status != orders.Accepted || !o.Open() || o.HoldID != s.hold || !o.ExpiresAt.Equal(expires) || !o.ClosedAt.IsZero() {
@@ -156,11 +157,11 @@ func TestIllegalTransitions(t *testing.T) {
 	s := newStore(t)
 	moves := map[string]func(tx pgx.Tx, id string) (orders.Order, error){
 		"accept": func(tx pgx.Tx, id string) (orders.Order, error) {
-			return orders.Accept(s.ctx, tx, id, s.hold, time.Time{})
+			return orders.Accept(s.ctx, tx, id, s.hold, time.Time{}, decimal.Zero)
 		},
 		"reject": func(tx pgx.Tx, id string) (orders.Order, error) { return orders.Reject(s.ctx, tx, id, "no") },
 		"fill":   func(tx pgx.Tx, id string) (orders.Order, error) { return orders.Fill(s.ctx, tx, id, dec("1"), s.entry) },
-		"cancel": func(tx pgx.Tx, id string) (orders.Order, error) { return orders.Cancel(s.ctx, tx, id) },
+		"cancel": func(tx pgx.Tx, id string) (orders.Order, error) { return orders.Cancel(s.ctx, tx, id, "") },
 		"expire": func(tx pgx.Tx, id string) (orders.Order, error) { return orders.Expire(s.ctx, tx, id) },
 	}
 	legal := map[orders.Status][]string{
@@ -207,7 +208,7 @@ func TestDatabaseRejectsIllegalChanges(t *testing.T) {
 	_, err := inTx(s, func(tx pgx.Tx) (orders.Order, error) { return orders.Fill(s.ctx, tx, filled.ID, dec("1"), s.entry) })
 	noErr(t, err)
 	canceled := s.accepted(t)
-	_, err = inTx(s, func(tx pgx.Tx) (orders.Order, error) { return orders.Cancel(s.ctx, tx, canceled.ID) })
+	_, err = inTx(s, func(tx pgx.Tx) (orders.Order, error) { return orders.Cancel(s.ctx, tx, canceled.ID, "") })
 	noErr(t, err)
 	exec := func(sql string, args ...any) error {
 		return pgx.BeginFunc(s.ctx, s.pool, func(tx pgx.Tx) error {
@@ -226,6 +227,8 @@ func TestDatabaseRejectsIllegalChanges(t *testing.T) {
 		{"expire a canceled order", `UPDATE orders SET status = 'expired' WHERE id = $1`, []any{canceled.ID}},
 		{"change the quantity", `UPDATE orders SET quantity = 5 WHERE id = $1`, []any{accepted.ID}},
 		{"change the hold", `UPDATE orders SET hold_id = NULL WHERE id = $1`, []any{accepted.ID}},
+		{"change the commission", `UPDATE orders SET commission = 5 WHERE id = $1`, []any{accepted.ID}},
+		{"a cancel reason on an open order", `UPDATE orders SET cancel_reason = 'x' WHERE id = $1`, []any{accepted.ID}},
 		{"delete", `DELETE FROM orders WHERE id = $1`, []any{accepted.ID}},
 		{"filled without a price", `UPDATE orders SET status = 'filled', closed_at = now() WHERE id = $1`, []any{accepted.ID}},
 	} {
@@ -318,7 +321,7 @@ func TestCancelRacesWithFill(t *testing.T) {
 			_, errs[0] = inTx(s, func(tx pgx.Tx) (orders.Order, error) { return orders.Fill(s.ctx, tx, o.ID, dec("1"), s.entry) })
 		})
 		wg.Go(func() {
-			_, errs[1] = inTx(s, func(tx pgx.Tx) (orders.Order, error) { return orders.Cancel(s.ctx, tx, o.ID) })
+			_, errs[1] = inTx(s, func(tx pgx.Tx) (orders.Order, error) { return orders.Cancel(s.ctx, tx, o.ID, "") })
 		})
 		wg.Wait()
 		if (errs[0] == nil) == (errs[1] == nil) {
@@ -381,7 +384,9 @@ func TestExpiring(t *testing.T) {
 	r := s.request()
 	r.TimeInForce = orders.Day
 	day := s.create(t, r)
-	_, err := inTx(s, func(tx pgx.Tx) (orders.Order, error) { return orders.Accept(s.ctx, tx, day.ID, s.hold, closeAt) })
+	_, err := inTx(s, func(tx pgx.Tx) (orders.Order, error) {
+		return orders.Accept(s.ctx, tx, day.ID, s.hold, closeAt, decimal.Zero)
+	})
 	noErr(t, err)
 	s.accepted(t) // GTC never expires
 
@@ -409,13 +414,13 @@ func TestDayOrdersExpire(t *testing.T) {
 	r.TimeInForce = orders.Day
 	day := s.create(t, r)
 	if _, err := inTx(s, func(tx pgx.Tx) (orders.Order, error) {
-		return orders.Accept(s.ctx, tx, day.ID, s.hold, time.Time{})
+		return orders.Accept(s.ctx, tx, day.ID, s.hold, time.Time{}, decimal.Zero)
 	}); err == nil {
 		t.Error("accepted a day order with no expiry")
 	}
 	gtc := s.create(t, s.request())
 	if _, err := inTx(s, func(tx pgx.Tx) (orders.Order, error) {
-		return orders.Accept(s.ctx, tx, gtc.ID, s.hold, time.Now())
+		return orders.Accept(s.ctx, tx, gtc.ID, s.hold, time.Now(), decimal.Zero)
 	}); err == nil {
 		t.Error("accepted a GTC order with an expiry")
 	}

@@ -246,6 +246,51 @@ func TestFailedCommitKeepsTheOrderBooked(t *testing.T) {
 	h.requireReconciled(t)
 }
 
+// A resting order whose fill can't be booked is canceled with the reason,
+// and its hold released, rather than tried again on every quote.
+func TestUnbookableFillsCancelTheOrder(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, engine.Config{})
+	alice := h.account(t, "1000")
+	h.quote("AAPL", "100.00", "100.10")
+	h.place(t, market(alice, ledger.Buy, "1"))
+	o := h.place(t, limit(alice, ledger.Sell, "1", "101"))
+	_, err := h.pool.Exec(h.ctx, `DELETE FROM fee_rates`)
+	noErr(t, err)
+
+	h.quote("AAPL", "101.00", "101.10")
+	h.engine.MatchForTest(h.ctx, "AAPL")
+	got, err := h.engine.Order(h.ctx, alice, o.ID)
+	noErr(t, err)
+	wantStatus(t, got, orders.Canceled, "")
+	if got.CancelReason != "regulatory fee rates aren't set up" {
+		t.Errorf("cancel reason %q", got.CancelReason)
+	}
+	h.wantBalance(t, alice, "AAPL", "1", "0")
+	h.requireReconciled(t)
+}
+
+// An order's commission is fixed when it's accepted, so a later change to
+// the configured commission can't leave its hold short.
+func TestCommissionIsFixedAtAccept(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, engine.Config{Commission: dec("1")})
+	alice := h.account(t, "1000")
+	o := h.place(t, limit(alice, ledger.Buy, "1", "99")) // holds 99 + 1
+	later, err := engine.New(h.ctx, engine.Config{
+		Pool: h.pool, Quotes: h.quotes, Calendar: calendar.New(), Now: h.clock, Commission: dec("5"),
+	})
+	noErr(t, err)
+
+	h.quote("AAPL", "97", "98")
+	later.MatchForTest(h.ctx, "AAPL")
+	got, err := later.Order(h.ctx, alice, o.ID)
+	noErr(t, err)
+	wantStatus(t, got, orders.Filled, "")
+	h.wantBalance(t, alice, ledger.USD, "901", "0")
+	h.requireReconciled(t)
+}
+
 // placeResting places n resting buys of one share at 99.
 func (h *harness) placeResting(t *testing.T, account string, n int) []string {
 	t.Helper()

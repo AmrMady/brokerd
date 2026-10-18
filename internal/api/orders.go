@@ -33,6 +33,8 @@ type orderJSON struct {
 	LimitPrice    decimal.NullDecimal `json:"limit_price"`
 	Status        string              `json:"status"`
 	RejectReason  string              `json:"reject_reason,omitempty"`
+	CancelReason  string              `json:"cancel_reason,omitempty"`
+	Commission    decimal.Decimal     `json:"commission"`
 	FillPrice     decimal.NullDecimal `json:"fill_price"`
 	CreatedAt     time.Time           `json:"created_at"`
 	UpdatedAt     time.Time           `json:"updated_at"`
@@ -44,7 +46,8 @@ func orderOf(o orders.Order) orderJSON {
 	out := orderJSON{
 		ID: o.ID, ClientOrderID: o.ClientOrderID, Symbol: string(o.Symbol), Side: string(o.Side), Type: string(o.Type),
 		TimeInForce: string(o.TimeInForce), Quantity: o.Quantity, LimitPrice: o.LimitPrice, Status: string(o.Status),
-		RejectReason: o.RejectReason, FillPrice: o.FillPrice, CreatedAt: o.CreatedAt, UpdatedAt: o.UpdatedAt,
+		RejectReason: o.RejectReason, CancelReason: o.CancelReason, Commission: o.Commission, FillPrice: o.FillPrice,
+		CreatedAt: o.CreatedAt, UpdatedAt: o.UpdatedAt,
 	}
 	if !o.ExpiresAt.IsZero() {
 		out.ExpiresAt = &o.ExpiresAt

@@ -33,7 +33,8 @@ type Config struct {
 	Pool     *pgxpool.Pool
 	Quotes   Quotes
 	Calendar *calendar.Calendar
-	// Commission is charged on every fill, in USD.
+	// Commission is charged on every fill, in USD. Each order keeps the
+	// commission in effect when it was accepted.
 	Commission decimal.Decimal
 	// Collar is how far above the ask a market buy's hold goes, as a
 	// fraction: 0.02 holds 2% more than the order costs at the ask.
@@ -250,7 +251,7 @@ func (e *Engine) tryAccept(ctx context.Context, tx pgx.Tx, o orders.Order) (orde
 	if o.TimeInForce == orders.Day {
 		expires = e.cfg.Calendar.Close(e.cfg.Calendar.Session(now))
 	}
-	if o, err = orders.Accept(ctx, tx, o.ID, hold.ID, expires); err != nil {
+	if o, err = orders.Accept(ctx, tx, o.ID, hold.ID, expires, e.cfg.Commission); err != nil {
 		return orders.Order{}, err
 	}
 	if o.Type == orders.Limit && open {
@@ -327,7 +328,7 @@ func (e *Engine) fill(ctx context.Context, tx pgx.Tx, o orders.Order, price deci
 		Side:       o.Side,
 		Quantity:   o.Quantity,
 		Price:      price,
-		Fee:        e.cfg.Commission,
+		Fee:        o.Commission,
 		TradeDate:  session,
 		SettleDate: e.cfg.Calendar.SettlementDate(session),
 	})
@@ -380,6 +381,8 @@ func rejectionFor(err error, o orders.Order) error {
 		return rejection("account is closed")
 	case errors.Is(err, ledger.ErrNoFeeRate):
 		return rejection("regulatory fee rates aren't set up")
+	case errors.Is(err, ledger.ErrHoldExceeded):
+		return rejection("the order's hold doesn't cover its fill")
 	default:
 		return err
 	}
@@ -407,10 +410,7 @@ func (e *Engine) Cancel(ctx context.Context, accountID, orderID string) (orders.
 		if !o.Open() {
 			return fmt.Errorf("%w: %s is %s", orders.ErrNotOpen, orderID, o.Status)
 		}
-		if _, err = ledger.ReleaseHold(ctx, tx, o.HoldID); err != nil {
-			return err
-		}
-		canceled, err = orders.Cancel(ctx, tx, orderID)
+		canceled, err = cancelLocked(ctx, tx, o, "")
 		return err
 	})
 	if err != nil {
@@ -418,6 +418,15 @@ func (e *Engine) Cancel(ctx context.Context, accountID, orderID string) (orders.
 	}
 	e.unbook(canceled.Symbol, canceled.ID)
 	return canceled, nil
+}
+
+// cancelLocked cancels o, which the caller has locked, and releases its
+// hold. reason says why when the client didn't ask for it.
+func cancelLocked(ctx context.Context, tx pgx.Tx, o orders.Order, reason string) (orders.Order, error) {
+	if _, err := ledger.ReleaseHold(ctx, tx, o.HoldID); err != nil {
+		return orders.Order{}, err
+	}
+	return orders.Cancel(ctx, tx, o.ID, reason)
 }
 
 // Order returns one of an account's orders.

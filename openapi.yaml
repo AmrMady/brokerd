@@ -397,6 +397,12 @@ components:
         limit_price: { oneOf: [{ $ref: "#/components/schemas/Decimal" }, { type: "null" }] }
         status: { type: string, enum: [accepted, filled, canceled, rejected, expired] }
         reject_reason: { type: string }
+        cancel_reason:
+          type: string
+          description: Why the order was canceled, when it wasn't the client, like a fill that couldn't be booked.
+        commission:
+          allOf: [{ $ref: "#/components/schemas/Decimal" }]
+          description: Charged on the fill, fixed when the order is accepted.
         fill_price: { oneOf: [{ $ref: "#/components/schemas/Decimal" }, { type: "null" }] }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }

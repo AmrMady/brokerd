@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"hash/maphash"
 	"sync"
 	"time"
@@ -106,6 +107,11 @@ func (e *Engine) match(ctx context.Context, symbol ledger.Asset) {
 // got to it first, or the market has closed since it was matched. A day
 // order whose session has closed is expired instead, even if the expiry
 // loop hasn't got to it yet.
+//
+// A fill that fails for a reason the client should see, like missing fee
+// rates, would fail the same way at every quote, so the order is canceled
+// with that reason instead. The fill runs in a savepoint, so rolling it
+// back leaves the order locked to cancel.
 func (e *Engine) fillResting(ctx context.Context, symbol ledger.Asset, id string, price decimal.Decimal) error {
 	var (
 		closed bool
@@ -128,11 +134,26 @@ func (e *Engine) fillResting(ctx context.Context, symbol ledger.Asset, id string
 		if !e.cfg.Calendar.IsOpen(now) {
 			return nil
 		}
-		if filled, err = e.fill(ctx, tx, o, price, now); err != nil {
+		sp, err := tx.Begin(ctx)
+		if err != nil {
 			return err
 		}
+		filled, err = e.fill(ctx, sp, o, price, now)
+		var reason rejection
+		if errors.As(rejectionFor(err, o), &reason) {
+			if err = sp.Rollback(ctx); err != nil {
+				return err
+			}
+			e.cfg.Logger.Warn("order canceled: its fill can't be booked", "order", o.ID, "reason", string(reason))
+			closed = true
+			_, err = cancelLocked(ctx, tx, o, string(reason))
+			return err
+		}
+		if err != nil {
+			return errors.Join(err, sp.Rollback(ctx))
+		}
 		closed = true
-		return nil
+		return sp.Commit(ctx)
 	})
 	// Until the transaction commits the order is still open, so one that
 	// fails to commit stays in the book.

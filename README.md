@@ -246,6 +246,11 @@ was canceled, or be both.
 - A fill's ID, `fill:<order id>`, is its ledger idempotency key, so an order
   can't post twice, even with two engines on one database. Whatever the
   fill didn't use of the hold is released in the same transaction.
+- A resting order whose fill fails for a reason that won't go away, like
+  missing fee rates, would fail at every quote, so it's canceled with that
+  reason and its hold released. Each order keeps the commission in effect
+  when it was accepted, which its hold covers, so changing the commission
+  can't leave a hold short.
 - Day orders expire at the close of their session. The market calendar
   knows weekends, holidays and early closes, and gives each fill its trade
   date and its T+1 settlement date.
