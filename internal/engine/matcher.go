@@ -134,7 +134,9 @@ func (e *Engine) fillResting(ctx context.Context, symbol ledger.Asset, id string
 		closed = true
 		return nil
 	})
-	if closed {
+	// Until the transaction commits the order is still open, so one that
+	// fails to commit stays in the book.
+	if err == nil && closed {
 		e.unbook(symbol, id)
 	}
 	if err == nil && filled.Status == orders.Filled {

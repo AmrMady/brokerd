@@ -223,6 +223,29 @@ func TestExpirySkipsOrdersThatFail(t *testing.T) {
 	}
 }
 
+// A fill whose transaction fails to commit leaves its order in the book, so
+// a later quote can fill it.
+func TestFailedCommitKeepsTheOrderBooked(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, engine.Config{})
+	alice := h.account(t, "1000")
+	o := h.place(t, limit(alice, ledger.Buy, "1", "99"))
+	h.failChange(t, o.ID, orders.Filled, true)
+	h.quote("AAPL", "97", "98")
+	h.engine.MatchForTest(h.ctx, "AAPL")
+	got, err := h.engine.Order(h.ctx, alice, o.ID)
+	noErr(t, err)
+	wantStatus(t, got, orders.Accepted, "")
+
+	_, err = h.pool.Exec(h.ctx, `DROP TRIGGER fail_change ON orders`)
+	noErr(t, err)
+	h.engine.MatchForTest(h.ctx, "AAPL")
+	got, err = h.engine.Order(h.ctx, alice, o.ID)
+	noErr(t, err)
+	wantStatus(t, got, orders.Filled, "")
+	h.requireReconciled(t)
+}
+
 // placeResting places n resting buys of one share at 99.
 func (h *harness) placeResting(t *testing.T, account string, n int) []string {
 	t.Helper()
