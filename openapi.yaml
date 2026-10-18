@@ -1,0 +1,454 @@
+openapi: 3.1.0
+info:
+  title: brokerd
+  version: "1.0"
+  description: |
+    A paper-trading brokerage API. Amounts, prices and quantities are decimal
+    strings, so they keep their exact value. Errors have the same shape
+    everywhere: `{"error": {"code", "message", "request_id"}}`.
+
+    Requests under `/v1/accounts/{account}` need that account's API key, as
+    `Authorization: Bearer bk_...`. The key is returned once, when the account
+    is created.
+
+    Every request that changes something takes an `Idempotency-Key` header.
+    A retry with the same key gets the first response back, with an
+    `Idempotent-Replayed: true` header; a retry while the first is still
+    running gets 409, and the same key with a different request gets 422.
+    Keys are kept for 24 hours.
+servers:
+  - url: http://localhost:8080
+security:
+  - apiKey: []
+
+paths:
+  /healthz:
+    get:
+      summary: The process is up.
+      security: []
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+  /readyz:
+    get:
+      summary: The server can take traffic. 503 while shutting down or without its database.
+      security: []
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+        "503": { $ref: "#/components/responses/Status" }
+  /metrics:
+    get:
+      summary: Prometheus metrics.
+      security: []
+      responses:
+        "200":
+          description: Metrics in the Prometheus text format.
+          content:
+            text/plain: {}
+
+  /v1/accounts:
+    post:
+      summary: Open an account. Its API key is only ever returned here.
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "201":
+          description: The account and its API key.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [account, api_key]
+                properties:
+                  account: { $ref: "#/components/schemas/Account" }
+                  api_key: { type: string, example: bk_3q2Lr0F2bQ... }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/accounts/{account}:
+    get:
+      summary: An account and its cash.
+      parameters:
+        - $ref: "#/components/parameters/Account"
+      responses:
+        "200":
+          description: The account.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Account" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/accounts/{account}/deposits:
+    post:
+      summary: Deposit paper money. The simulated bank confirms at once.
+      parameters:
+        - $ref: "#/components/parameters/Account"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody: { $ref: "#/components/requestBodies/Transfer" }
+      responses:
+        "201": { $ref: "#/components/responses/Transfer" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/accounts/{account}/withdrawals:
+    post:
+      summary: Withdraw settled cash that isn't held for open orders.
+      parameters:
+        - $ref: "#/components/parameters/Account"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody: { $ref: "#/components/requestBodies/Transfer" }
+      responses:
+        "201": { $ref: "#/components/responses/Transfer" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/accounts/{account}/orders:
+    post:
+      summary: Place an order.
+      description: |
+        A market order fills at once at the ask or the bid, and so does a limit
+        order the quote already crosses; other limit orders rest until a quote
+        crosses them. An order the account can't cover is created as rejected,
+        with the reason. Without a client_order_id, the Idempotency-Key is used
+        as one.
+      parameters:
+        - $ref: "#/components/parameters/Account"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OrderRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/Order" }
+        default: { $ref: "#/components/responses/Error" }
+    get:
+      summary: An account's orders, newest first.
+      parameters:
+        - $ref: "#/components/parameters/Account"
+        - name: status
+          in: query
+          schema: { type: string, enum: [open, all], default: all }
+        - name: before
+          in: query
+          description: The id of the last order of the previous page.
+          schema: { type: string, format: uuid }
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: The orders.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Order" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/accounts/{account}/orders/{order}:
+    get:
+      summary: One order.
+      parameters:
+        - $ref: "#/components/parameters/Account"
+        - $ref: "#/components/parameters/Order"
+      responses:
+        "200": { $ref: "#/components/responses/Order" }
+        default: { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Cancel an open order and release its hold. 409 if it isn't open.
+      parameters:
+        - $ref: "#/components/parameters/Account"
+        - $ref: "#/components/parameters/Order"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200": { $ref: "#/components/responses/Order" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/accounts/{account}/positions:
+    get:
+      summary: The account's positions, valued at the latest bid.
+      parameters:
+        - $ref: "#/components/parameters/Account"
+      responses:
+        "200":
+          description: The positions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Position" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/accounts/{account}/activities:
+    get:
+      summary: Everything that changed the account, newest first.
+      parameters:
+        - $ref: "#/components/parameters/Account"
+        - name: before
+          in: query
+          description: The id of the last activity of the previous page.
+          schema: { type: integer, minimum: 1 }
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: The activities.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Activity" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/quotes/{symbol}:
+    get:
+      summary: A symbol's latest quote.
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/Symbol"
+      responses:
+        "200":
+          description: The quote.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Quote" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/bars/{symbol}:
+    get:
+      summary: A symbol's most recent bars, oldest first.
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/Symbol"
+        - name: timeframe
+          in: query
+          schema: { type: string, enum: [1s, 1m], default: 1m }
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: The bars.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Bar" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /v1/stream:
+    get:
+      summary: Stream trades, quotes and bars over a WebSocket.
+      description: |
+        Send `{"action": "subscribe", "trades": ["AAPL"], "quotes": [...], "bars": [...]}`,
+        or "unsubscribe". Frames are JSON arrays of messages, each with a
+        "type": "subscription", "error", "trade", "quote" or "bar". The
+        handshake's Stream-Session header names the server's session; sequence
+        numbers start over in a new one. A client that falls behind loses its
+        oldest messages, and one that stays behind for 5 seconds is
+        disconnected.
+      security: []
+      responses:
+        "101":
+          description: Switching to the WebSocket protocol.
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: The account's API key, bk_...
+
+  parameters:
+    Account:
+      name: account
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Order:
+      name: order
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Symbol:
+      name: symbol
+      in: path
+      required: true
+      schema: { type: string, example: AAPL }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: Makes the request safe to retry, for 24 hours.
+      schema: { type: string, maxLength: 255 }
+
+  requestBodies:
+    Transfer:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [amount]
+            additionalProperties: false
+            properties:
+              amount: { $ref: "#/components/schemas/Decimal" }
+
+  responses:
+    Status:
+      description: The server's status.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status: { type: string }
+    Transfer:
+      description: The transfer.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Transfer" }
+    Order:
+      description: The order.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Order" }
+    Error:
+      description: |
+        400 invalid_json, 401 unauthorized, 403 account_not_active,
+        404 not_found, 409 order_not_open, idempotency_conflict or
+        request_in_progress, 413 too_large, 422 invalid_request,
+        insufficient_funds, unsettled_funds or idempotency_key_reused,
+        500 internal.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Decimal:
+      type: string
+      pattern: '^-?[0-9]+(\.[0-9]+)?$'
+      example: "227.16"
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, request_id]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            request_id: { type: string }
+
+    Account:
+      type: object
+      required: [id, number, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        number: { type: string }
+        status: { type: string, enum: [active, restricted, closed] }
+        created_at: { type: string, format: date-time }
+        cash:
+          type: object
+          properties:
+            balance: { $ref: "#/components/schemas/Decimal" }
+            held: { $ref: "#/components/schemas/Decimal" }
+            unsettled: { $ref: "#/components/schemas/Decimal" }
+            available: { $ref: "#/components/schemas/Decimal" }
+            withdrawable: { $ref: "#/components/schemas/Decimal" }
+
+    Transfer:
+      type: object
+      properties:
+        id: { type: integer }
+        direction: { type: string, enum: [deposit, withdrawal] }
+        amount: { $ref: "#/components/schemas/Decimal" }
+        status: { type: string, enum: [pending, completed, returned, canceled] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    OrderRequest:
+      type: object
+      required: [symbol, side, type, time_in_force, qty]
+      additionalProperties: false
+      properties:
+        symbol: { type: string }
+        side: { type: string, enum: [buy, sell] }
+        type: { type: string, enum: [market, limit] }
+        time_in_force: { type: string, enum: [day, gtc] }
+        qty: { $ref: "#/components/schemas/Decimal" }
+        limit_price:
+          description: Limit orders only. A cent at $1 and up, a hundredth of a cent below.
+          oneOf:
+            - $ref: "#/components/schemas/Decimal"
+            - type: "null"
+        client_order_id: { type: string, maxLength: 64 }
+
+    Order:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        client_order_id: { type: string }
+        symbol: { type: string }
+        side: { type: string, enum: [buy, sell] }
+        type: { type: string, enum: [market, limit] }
+        time_in_force: { type: string, enum: [day, gtc] }
+        qty: { $ref: "#/components/schemas/Decimal" }
+        limit_price: { oneOf: [{ $ref: "#/components/schemas/Decimal" }, { type: "null" }] }
+        status: { type: string, enum: [accepted, filled, canceled, rejected, expired] }
+        reject_reason: { type: string }
+        fill_price: { oneOf: [{ $ref: "#/components/schemas/Decimal" }, { type: "null" }] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        expires_at: { type: [string, "null"], format: date-time }
+        closed_at: { type: [string, "null"], format: date-time }
+
+    Position:
+      type: object
+      description: The cost fields are null when part of the cost is unknown, the market fields when there's no bid.
+      properties:
+        symbol: { type: string }
+        qty: { $ref: "#/components/schemas/Decimal" }
+        qty_available: { $ref: "#/components/schemas/Decimal" }
+        cost_basis: { oneOf: [{ $ref: "#/components/schemas/Decimal" }, { type: "null" }] }
+        avg_entry_price: { oneOf: [{ $ref: "#/components/schemas/Decimal" }, { type: "null" }] }
+        current_price: { oneOf: [{ $ref: "#/components/schemas/Decimal" }, { type: "null" }] }
+        market_value: { oneOf: [{ $ref: "#/components/schemas/Decimal" }, { type: "null" }] }
+        unrealized_pl: { oneOf: [{ $ref: "#/components/schemas/Decimal" }, { type: "null" }] }
+
+    Activity:
+      type: object
+      properties:
+        id: { type: integer }
+        type: { type: string, enum: [deposit, withdrawal, deposit_return, withdrawal_return, trade_fill, reversal] }
+        created_at: { type: string, format: date-time }
+        details:
+          type: object
+          additionalProperties: { type: string }
+        changes:
+          type: array
+          items:
+            type: object
+            properties:
+              asset: { type: string }
+              amount: { $ref: "#/components/schemas/Decimal" }
+
+    Quote:
+      type: object
+      properties:
+        symbol: { type: string }
+        bid: { $ref: "#/components/schemas/Decimal" }
+        bid_size: { $ref: "#/components/schemas/Decimal" }
+        ask: { $ref: "#/components/schemas/Decimal" }
+        ask_size: { $ref: "#/components/schemas/Decimal" }
+        timestamp: { type: string, format: date-time }
+        seq: { type: integer }
+
+    Bar:
+      type: object
+      properties:
+        start: { type: string, format: date-time }
+        open: { $ref: "#/components/schemas/Decimal" }
+        high: { $ref: "#/components/schemas/Decimal" }
+        low: { $ref: "#/components/schemas/Decimal" }
+        close: { $ref: "#/components/schemas/Decimal" }
+        volume: { $ref: "#/components/schemas/Decimal" }
+        trades: { type: integer }

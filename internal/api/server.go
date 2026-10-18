@@ -46,6 +46,7 @@ type Bars interface {
 type Server struct {
 	cfg      Config
 	mux      *http.ServeMux
+	routes   []string // patterns, for checking against the OpenAPI spec
 	draining atomic.Bool
 }
 
@@ -64,8 +65,8 @@ func New(cfg Config) *Server {
 		cfg.ObservePost = func(time.Duration) {}
 	}
 	s := &Server{cfg: cfg, mux: http.NewServeMux()}
-	s.mux.HandleFunc("GET /healthz", s.healthz)
-	s.mux.HandleFunc("GET /readyz", s.readyz)
+	s.route("GET /healthz", func(w http.ResponseWriter, r *http.Request) error { s.healthz(w, r); return nil })
+	s.route("GET /readyz", func(w http.ResponseWriter, r *http.Request) error { s.readyz(w, r); return nil })
 	// Anything else gets the usual JSON error rather than the mux's text.
 	s.route("/", func(http.ResponseWriter, *http.Request) error { return errNotFound })
 	if cfg.Quotes != nil && cfg.Bars != nil {
@@ -104,6 +105,7 @@ func (s *Server) Drain() {
 type handlerFunc func(w http.ResponseWriter, r *http.Request) error
 
 func (s *Server) route(pattern string, h handlerFunc) {
+	s.routes = append(s.routes, pattern)
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		if err := h(w, r); err != nil {
 			s.writeError(w, r, err)
