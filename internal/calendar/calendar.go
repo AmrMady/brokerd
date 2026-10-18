@@ -1,5 +1,5 @@
-// Package calendar knows which days the US stock market trades, when each
-// session closes, and when trades settle.
+// Package calendar knows which days the US stock market trades, when it
+// opens and closes, and when trades settle.
 package calendar
 
 import (
@@ -13,10 +13,13 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-// The market's time zone, and its regular close.
+// The market's time zone, and its regular hours.
 var newYork = mustLoad("America/New_York")
 
-const regularClose = 16 * time.Hour
+const (
+	regularOpen  = 9*time.Hour + 30*time.Minute
+	regularClose = 16 * time.Hour
+)
 
 func mustLoad(name string) *time.Location {
 	loc, err := time.LoadLocation(name)
@@ -88,7 +91,7 @@ func AddHoliday(ctx context.Context, tx pgx.Tx, h Holiday) error {
 	}
 	var closesAt pgtype.Time
 	if h.EarlyClose != 0 {
-		if h.EarlyClose <= 9*time.Hour+30*time.Minute || h.EarlyClose >= regularClose || h.EarlyClose%time.Minute != 0 {
+		if h.EarlyClose <= regularOpen || h.EarlyClose >= regularClose || h.EarlyClose%time.Minute != 0 {
 			return fmt.Errorf("an early close must be a whole minute between 09:30 and 16:00, got %s", h.EarlyClose)
 		}
 		closesAt = pgtype.Time{Microseconds: h.EarlyClose.Microseconds(), Valid: true}
@@ -138,20 +141,25 @@ func (c *Calendar) NextTradingDay(day time.Time) time.Time {
 
 // Close returns when the market closes on trading day day.
 func (c *Calendar) Close(day time.Time) time.Time {
-	day = date(day)
 	closing := regularClose
-	if h, ok := c.holidays[day]; ok && h.EarlyClose != 0 {
+	if h, ok := c.holidays[date(day)]; ok && h.EarlyClose != 0 {
 		closing = h.EarlyClose
 	}
-	return time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, newYork).Add(closing)
+	return inNewYork(day, closing)
+}
+
+// IsOpen reports whether t is in the market's regular session: on a trading
+// day, from 09:30 New York time until the close.
+func (c *Calendar) IsOpen(t time.Time) bool {
+	today := newYorkDate(t)
+	return c.IsTradingDay(today) && !t.Before(inNewYork(today, regularOpen)) && t.Before(c.Close(today))
 }
 
 // Session returns the trading day that now belongs to: today in New York
 // if it's a trading day and the market hasn't closed yet, otherwise the
 // next trading day.
 func (c *Calendar) Session(now time.Time) time.Time {
-	ny := now.In(newYork)
-	today := time.Date(ny.Year(), ny.Month(), ny.Day(), 0, 0, 0, 0, time.UTC)
+	today := newYorkDate(now)
 	if c.IsTradingDay(today) && now.Before(c.Close(today)) {
 		return today
 	}
@@ -176,4 +184,17 @@ func timeOfDay(t pgtype.Time) time.Duration {
 func date(t time.Time) time.Time {
 	y, m, d := t.Date()
 	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+}
+
+// newYorkDate returns the date it is in New York at t.
+func newYorkDate(t time.Time) time.Time {
+	return date(t.In(newYork))
+}
+
+// inNewYork returns the time of day tod in New York on day. It sets the
+// clock rather than adding tod to midnight, which is an hour off on the
+// days the clocks change.
+func inNewYork(day time.Time, tod time.Duration) time.Time {
+	y, m, d := day.Date()
+	return time.Date(y, m, d, int(tod/time.Hour), int(tod%time.Hour/time.Minute), 0, 0, newYork)
 }

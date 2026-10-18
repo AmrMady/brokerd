@@ -90,3 +90,30 @@ func TestSession(t *testing.T) {
 		}
 	}
 }
+
+func TestIsOpen(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		now  string
+		want bool
+	}{
+		{"2026-10-16T13:29:00Z", false}, // Friday, 09:29 EDT
+		{"2026-10-16T13:30:00Z", true},  // the open
+		{"2026-10-16T19:59:59Z", true},  // a second before the close
+		{"2026-10-16T20:00:00Z", false}, // 16:00 EDT, the close
+		{"2026-10-17T15:00:00Z", false}, // Saturday
+		{"2026-10-18T15:00:00Z", false}, // Sunday
+		{"2026-11-02T13:30:00Z", false}, // the clocks went back: 08:30 EST
+		{"2026-11-02T14:30:00Z", true},  // 09:30 EST
+		{"2026-11-02T20:59:59Z", true},
+		{"2026-11-02T21:00:00Z", false},
+		{"2026-03-09T13:30:00Z", true},  // the clocks went forward: 09:30 EDT
+		{"2026-11-26T16:00:00Z", false}, // Thanksgiving
+		{"2026-11-27T17:59:59Z", true},  // a second before the early close
+		{"2026-11-27T18:00:00Z", false}, // 13:00 EST, the early close
+	} {
+		if got := cal.IsOpen(at(tt.now)); got != tt.want {
+			t.Errorf("IsOpen(%s) = %t, want %t", tt.now, got, tt.want)
+		}
+	}
+}

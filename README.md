@@ -66,7 +66,9 @@ make run    # Postgres, migrations and brokerd on :8080 (set BROKERD_PORT to cha
 ```
 
 The compose setup sets the regulatory fees to zero so sells work out of the
-box. Then, in another terminal:
+box. Market orders only fill while the market is open, 09:30 to 16:00 New
+York time on trading days; at other times they're rejected. Then, in
+another terminal:
 
 ```bash
 curl -s -X POST localhost:8080/v1/accounts
@@ -231,6 +233,10 @@ was canceled, or be both.
 - Market orders fill at once at the ask or the bid, and so do limit orders
   the quote already crosses. Other limit orders rest in a per-symbol book,
   best price first, then oldest first.
+- Orders only fill in the regular session, 09:30 to 16:00 New York time on
+  trading days, or until an early close. Outside it, market orders are
+  rejected with `market is closed`, and limit orders are taken but rest
+  until a quote crosses them after the open.
 - A quote only marks its symbol for matching; it never waits on the
   database. A few workers, each owning the symbols that hash to it, check
   the symbol's book against its latest quote and fill what crosses, at the
@@ -386,7 +392,8 @@ its account's order.
 ## Load test
 
 `cmd/loadtest` runs traders, each with its own account, placing market buys,
-market sells and limit buys that rest and are then canceled. Against
+market sells and limit buys that rest and are then canceled, so it needs
+the market to be open. Against
 `make run` on an Apple M4 Pro, with Postgres in Docker:
 
 | Traders | Requests/s | Market order p50 / p95 / p99 | Limit order p50 | Cancel p50 |

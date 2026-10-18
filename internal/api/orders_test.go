@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/shopspring/decimal"
 
@@ -13,7 +12,7 @@ import (
 
 func (c *client) quote(bid, ask string) {
 	c.quotes.HandleQuote(marketdata.Quote{
-		Symbol: "AAPL", Bid: decimal.RequireFromString(bid), Ask: decimal.RequireFromString(ask), Timestamp: time.Now(),
+		Symbol: "AAPL", Bid: decimal.RequireFromString(bid), Ask: decimal.RequireFromString(ask), Timestamp: friday,
 	})
 }
 

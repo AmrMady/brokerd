@@ -328,6 +328,43 @@ func TestDayOrdersExpireAtTheClose(t *testing.T) {
 	}
 }
 
+// Market orders are only taken while the market is open. Limit orders are
+// taken at any time, but don't fill until it opens, even when the quote
+// already crosses them.
+func TestMarketHours(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, engine.Config{})
+	run(t, h.engine)
+	alice := h.account(t, "10000")
+	var resting []string
+	for _, now := range []time.Time{
+		time.Date(2026, 10, 16, 13, 29, 0, 0, time.UTC), // Friday, 09:29 in New York
+		time.Date(2026, 10, 16, 20, 0, 0, 0, time.UTC),  // Friday's close
+		time.Date(2026, 10, 17, 15, 0, 0, 0, time.UTC),  // Saturday
+	} {
+		h.setNow(now)
+		h.tick("AAPL", "100.00", "100.10")
+		wantStatus(t, h.place(t, market(alice, ledger.Buy, "1")), orders.Rejected, "market is closed")
+		o := h.place(t, limit(alice, ledger.Buy, "1", "101"))
+		wantStatus(t, o, orders.Accepted, "")
+		resting = append(resting, o.ID)
+	}
+	time.Sleep(50 * time.Millisecond) // for the matcher to have seen the quotes
+	for _, id := range resting {
+		o, err := h.engine.Order(h.ctx, alice, id)
+		noErr(t, err)
+		wantStatus(t, o, orders.Accepted, "")
+	}
+
+	h.setNow(time.Date(2026, 10, 19, 13, 30, 0, 0, time.UTC)) // Monday's open
+	h.tick("AAPL", "100.00", "100.10")
+	for _, id := range resting {
+		h.waitFor(t, alice, id, orders.Filled)
+	}
+	wantStatus(t, h.place(t, market(alice, ledger.Buy, "1")), orders.Filled, "")
+	h.requireReconciled(t)
+}
+
 func TestCommission(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, engine.Config{Commission: dec("1")})

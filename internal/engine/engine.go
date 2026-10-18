@@ -131,10 +131,11 @@ func (r rejection) Error() string { return string(r) }
 // Place records an order and, if the account can cover it, accepts it by
 // placing a hold: cash for a buy, shares for a sell. A market order then
 // fills at once at the ask or the bid, and so does a limit order the quote
-// already crosses; other limit orders rest until a quote crosses them. An order the account can't cover,
-// or a market order with no usable quote, is stored as rejected, with the
-// reason. Placing an order with a client order ID that was used before
-// returns the first order.
+// already crosses while the market is open; other limit orders rest until
+// a quote crosses them in a session. An order the account can't cover, or
+// a market order while the market is closed or with no usable quote, is
+// stored as rejected, with the reason. Placing an order with a client
+// order ID that was used before returns the first order.
 func (e *Engine) Place(ctx context.Context, r orders.Request) (orders.Order, error) {
 	if err := r.Validate(); err != nil {
 		return orders.Order{}, err
@@ -203,8 +204,13 @@ func (e *Engine) accept(ctx context.Context, tx pgx.Tx, o orders.Order) (orders.
 }
 
 func (e *Engine) tryAccept(ctx context.Context, tx pgx.Tx, o orders.Order) (orders.Order, error) {
+	now := e.cfg.Now()
+	open := e.cfg.Calendar.IsOpen(now)
 	var price decimal.Decimal // what a market order fills at
 	if o.Type == orders.Market {
+		if !open {
+			return orders.Order{}, rejection("market is closed")
+		}
 		q, err := e.quote(o.Symbol)
 		if err != nil {
 			return orders.Order{}, err
@@ -229,16 +235,16 @@ func (e *Engine) tryAccept(ctx context.Context, tx pgx.Tx, o orders.Order) (orde
 	}
 	var expires time.Time
 	if o.TimeInForce == orders.Day {
-		expires = e.cfg.Calendar.Close(e.cfg.Calendar.Session(e.cfg.Now()))
+		expires = e.cfg.Calendar.Close(e.cfg.Calendar.Session(now))
 	}
 	if o, err = orders.Accept(ctx, tx, o.ID, hold.ID, expires); err != nil {
 		return orders.Order{}, err
 	}
-	if o.Type == orders.Limit {
+	if o.Type == orders.Limit && open {
 		price = e.marketable(o)
 	}
 	if price.IsPositive() {
-		if o, err = e.fill(ctx, tx, o, price); err != nil {
+		if o, err = e.fill(ctx, tx, o, price, now); err != nil {
 			return orders.Order{}, rejectionFor(err, o)
 		}
 	}
@@ -293,11 +299,12 @@ func (e *Engine) holdAmount(o orders.Order, ask decimal.Decimal) decimal.Decimal
 	return o.Quantity.Mul(price).RoundCeil(2).Add(e.cfg.Commission)
 }
 
-// fill books an accepted order's fill at price, releases what's left of its
-// hold, and marks it filled. The fill's ID is the ledger's idempotency key,
-// so the same order can't fill twice.
-func (e *Engine) fill(ctx context.Context, tx pgx.Tx, o orders.Order, price decimal.Decimal) (orders.Order, error) {
-	session := e.cfg.Calendar.Session(e.cfg.Now())
+// fill books an accepted order's fill at price, made at now while the
+// market is open, releases what's left of its hold, and marks it filled.
+// The fill's ID is the ledger's idempotency key, so the same order can't
+// fill twice.
+func (e *Engine) fill(ctx context.Context, tx pgx.Tx, o orders.Order, price decimal.Decimal, now time.Time) (orders.Order, error) {
+	session := e.cfg.Calendar.Session(now)
 	began := time.Now()
 	entry, err := ledger.SettleFill(ctx, tx, ledger.Fill{
 		ID:         "fill:" + o.ID,

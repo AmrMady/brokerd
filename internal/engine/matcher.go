@@ -76,8 +76,12 @@ func (e *Engine) work(ctx context.Context, w *worker) {
 	}
 }
 
-// match fills the symbol's resting orders that its latest quote crosses.
+// match fills the symbol's resting orders that its latest quote crosses,
+// while the market is open.
 func (e *Engine) match(ctx context.Context, symbol ledger.Asset) {
+	if !e.cfg.Calendar.IsOpen(e.cfg.Now()) {
+		return
+	}
 	q, err := e.quote(symbol)
 	if err != nil {
 		return // no fresh quote, nothing fills
@@ -99,7 +103,7 @@ func (e *Engine) match(ctx context.Context, symbol ledger.Asset) {
 }
 
 // fillResting fills a resting order at price, unless a cancel or an expiry
-// got to it first.
+// got to it first, or the market has closed since it was matched.
 func (e *Engine) fillResting(ctx context.Context, symbol ledger.Asset, id string, price decimal.Decimal) error {
 	var (
 		closed bool
@@ -114,7 +118,11 @@ func (e *Engine) fillResting(ctx context.Context, symbol ledger.Asset, id string
 			closed = true
 			return nil
 		}
-		if filled, err = e.fill(ctx, tx, o, price); err != nil {
+		now := e.cfg.Now()
+		if !e.cfg.Calendar.IsOpen(now) {
+			return nil
+		}
+		if filled, err = e.fill(ctx, tx, o, price, now); err != nil {
 			return err
 		}
 		closed = true

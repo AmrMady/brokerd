@@ -31,6 +31,9 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// The engine's clock: Friday, 10:00 in New York, when the market is open.
+var friday = time.Date(2026, 10, 16, 14, 0, 0, 0, time.UTC)
+
 type client struct {
 	t      *testing.T
 	url    string
@@ -63,7 +66,9 @@ func newClient(t *testing.T) *client {
 	if err = api.MaintainIdempotency(t.Context(), pool, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	eng, err := engine.New(t.Context(), engine.Config{Pool: pool, Quotes: quotes, Calendar: calendar.New()})
+	eng, err := engine.New(t.Context(), engine.Config{
+		Pool: pool, Quotes: quotes, Calendar: calendar.New(), Now: func() time.Time { return friday },
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
