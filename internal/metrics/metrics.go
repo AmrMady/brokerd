@@ -77,10 +77,14 @@ func (r *Registry) MarketData(seq *marketdata.Sequencer, bars map[string]*market
 		func(s marketdata.SequenceStats) uint64 { return s.Events })
 	counter("brokerd_marketdata_sequence_gaps_total", "Events that skipped ahead in their symbol's sequence.",
 		func(s marketdata.SequenceStats) uint64 { return s.Gaps })
-	counter("brokerd_marketdata_missed_events_total", "Sequence numbers skipped by gaps.",
-		func(s marketdata.SequenceStats) uint64 { return s.Missed })
+	counter("brokerd_marketdata_late_events_total", "Events that arrived after a later one and filled a gap.",
+		func(s marketdata.SequenceStats) uint64 { return s.Late })
 	counter("brokerd_marketdata_stale_events_total", "Duplicate or out-of-order events dropped.",
 		func(s marketdata.SequenceStats) uint64 { return s.Stale })
+	// Missed goes down when a late event fills its gap, so it's a gauge.
+	r.reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "brokerd_marketdata_missed_events", Help: "Sequence numbers skipped by gaps and not filled since.",
+	}, func() float64 { return float64(seq.Stats().Missed) }))
 
 	for timeframe, agg := range bars {
 		labels := prometheus.Labels{"timeframe": timeframe}

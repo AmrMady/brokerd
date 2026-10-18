@@ -48,10 +48,29 @@ func TestSequencer(t *testing.T) {
 			stats: marketdata.SequenceStats{Stale: 1},
 		},
 		{
-			name:  "out of order",
+			name:  "a late trade fills its gap",
 			in:    []any{trade("AAPL", 1), trade("AAPL", 3), trade("AAPL", 2), trade("AAPL", 4)},
-			want:  []string{"AAPL 1", "AAPL 3", "AAPL 4"},
-			stats: marketdata.SequenceStats{Gaps: 1, Missed: 1, Stale: 1},
+			want:  []string{"AAPL 1", "AAPL 3", "AAPL 2", "AAPL 4"},
+			stats: marketdata.SequenceStats{Gaps: 1, Late: 1},
+		},
+		{
+			name:  "a late trade comes once",
+			in:    []any{trade("AAPL", 1), trade("AAPL", 3), trade("AAPL", 2), trade("AAPL", 2)},
+			want:  []string{"AAPL 1", "AAPL 3", "AAPL 2"},
+			stats: marketdata.SequenceStats{Gaps: 1, Late: 1, Stale: 1},
+		},
+		{
+			name:  "a late quote is dropped, since the newest wins",
+			in:    []any{quote("AAPL", 1), quote("AAPL", 3), quote("AAPL", 2)},
+			want:  []string{"AAPL 1", "AAPL 3"},
+			stats: marketdata.SequenceStats{Gaps: 1, Late: 1, Stale: 1},
+		},
+		{
+			name: "only the newest skipped numbers are remembered",
+			in:   []any{trade("AAPL", 1), trade("AAPL", 2000), trade("AAPL", 2), trade("AAPL", 1999)},
+			want: []string{"AAPL 1", "AAPL 2000", "AAPL 1999"},
+			// 2 to 1999 were skipped; 2 is too far back to be remembered.
+			stats: marketdata.SequenceStats{Gaps: 1, Missed: 1997, Late: 1, Stale: 1},
 		},
 		{
 			name:  "trades and quotes share a sequence",

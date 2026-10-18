@@ -47,7 +47,7 @@ func TestMetrics(t *testing.T) {
 	r.Stream(hub)
 
 	start := time.Date(2026, 10, 16, 13, 30, 0, 0, time.UTC)
-	for i, n := range []uint64{1, 2, 5, 5} { // a gap of two, then a duplicate
+	for i, n := range []uint64{1, 2, 5, 5, 4} { // a gap of two, a duplicate, and one late
 		seq.HandleTrade(marketdata.Trade{
 			Symbol: "AAPL", Price: decimal.NewFromInt(10), Size: decimal.NewFromInt(1),
 			Timestamp: start.Add(time.Duration(i) * time.Second), Seq: n,
@@ -59,11 +59,12 @@ func TestMetrics(t *testing.T) {
 
 	out := scrape(t, r)
 	for _, line := range []string{
-		"brokerd_marketdata_events_total 3",
+		"brokerd_marketdata_events_total 4",
 		"brokerd_marketdata_sequence_gaps_total 1",
-		"brokerd_marketdata_missed_events_total 2",
+		"brokerd_marketdata_missed_events 1",
+		"brokerd_marketdata_late_events_total 1",
 		"brokerd_marketdata_stale_events_total 1",
-		`brokerd_marketdata_bars_total{timeframe="1s"} 2`,
+		`brokerd_marketdata_bars_total{timeframe="1s"} 3`,
 		`brokerd_marketdata_late_trades_total{timeframe="1s"} 0`,
 		"brokerd_stream_clients 0",
 		"brokerd_stream_dropped_messages_total 0",

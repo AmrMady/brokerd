@@ -231,7 +231,7 @@ func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.L
 
 	seq, s, m, h := sequencer.Stats(), seconds.Stats(), minutes.Stats(), hub.Stats()
 	logger.Info("stopped",
-		"gaps", seq.Gaps, "missed", seq.Missed, "stale", seq.Stale,
+		"gaps", seq.Gaps, "missed", seq.Missed, "late", seq.Late, "stale", seq.Stale,
 		"bars", s.Bars+m.Bars, "late_1s", s.Late, "late_1m", m.Late,
 		"dropped", h.Dropped, "disconnected", h.Disconnected)
 	return err

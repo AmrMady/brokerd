@@ -283,9 +283,11 @@ goroutine. Each symbol's events carry a sequence number.
   and can keep the original spacing between events, sped up or not. Bad
   rows fail with their line number.
 - The sequencer passes on events in order. A symbol's first event starts its
-  sequence; an event that skips ahead is passed on and counted as a gap,
-  and one at or behind the last is dropped and counted as stale. Late
-  events aren't held back to fill a gap: for prices, the newest one wins.
+  sequence; an event that skips ahead is passed on and counted as a gap.
+  Each symbol remembers its newest 1,024 skipped numbers, so an event that
+  arrives late can fill its gap: a late trade is passed on, so bars still
+  count its volume, and a late quote is dropped, since the newest price
+  wins. Duplicates, and anything older, are dropped as stale.
 - The latest-quote cache is read far more than it's written, so reads take
   no locks. Each symbol has an `atomic.Pointer` to an immutable quote, and
   an update stores a pointer to a new one. The pointers live in a `sync.Map`,
