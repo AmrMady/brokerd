@@ -5,6 +5,8 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/AmrMady/brokerd/internal/ledger"
 )
 
@@ -37,4 +39,46 @@ func TestActivities(t *testing.T) {
 
 	_, err = ledger.Activities(l.ctx, l.pool, alice, 0, ledger.MaxPageSize+1)
 	wantErr(t, err, ledger.ErrInvalid)
+}
+
+// Every posting writes an entry_posted event in its own transaction, keyed
+// by its account, in the order the postings happened.
+func TestPostingsWriteEvents(t *testing.T) {
+	t.Parallel()
+	l := newTestLedger(t)
+	alice := l.openAccount(t)
+	l.mustDeposit(t, "d1", alice, "1000")
+	l.buy(t, "f1", alice, "2", "100")
+	_, err := l.withdraw("w1", alice, "5000") // fails, so writes nothing
+	wantErr(t, err, ledger.ErrInsufficientFunds)
+
+	rows, err := l.pool.Query(l.ctx, `SELECT type, key, payload FROM outbox ORDER BY seq`)
+	noErr(t, err)
+	type event struct {
+		Type, Key string
+		Payload   struct {
+			EntryID int64
+			Kind    string
+			Lines   []struct {
+				AccountID string `json:"account_id"`
+				Amount    string
+				Version   int64
+			}
+		}
+	}
+	events, err := pgx.CollectRows(rows, pgx.RowToStructByPos[event])
+	noErr(t, err)
+	var got []string
+	for _, e := range events {
+		got = append(got, fmt.Sprintf("%s %t %s", e.Type, e.Key == alice, e.Payload.Kind))
+		for _, line := range e.Payload.Lines {
+			if line.AccountID == alice && line.Version == 0 {
+				t.Errorf("%s line has no version", e.Payload.Kind)
+			}
+		}
+	}
+	want := []string{"entry_posted true deposit", "entry_posted true trade_fill"}
+	if !slices.Equal(got, want) {
+		t.Errorf("events %q, want %q", got, want)
+	}
 }

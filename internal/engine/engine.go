@@ -19,6 +19,7 @@ import (
 	"github.com/AmrMady/brokerd/internal/ledger"
 	"github.com/AmrMady/brokerd/internal/marketdata"
 	"github.com/AmrMady/brokerd/internal/orders"
+	"github.com/AmrMady/brokerd/internal/outbox"
 )
 
 // Quotes gives the latest quote for a symbol.
@@ -323,7 +324,26 @@ func (e *Engine) fill(ctx context.Context, tx pgx.Tx, o orders.Order, price deci
 			return o, err
 		}
 	}
-	return orders.Fill(ctx, tx, o.ID, price, entry.ID)
+	if o, err = orders.Fill(ctx, tx, o.ID, price, entry.ID); err != nil {
+		return o, err
+	}
+	return o, outbox.Add(ctx, tx, outbox.OrderFilled, o.AccountID, filledEvent{
+		OrderID: o.ID, AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, Symbol: o.Symbol, Side: o.Side,
+		Quantity: o.Quantity, Price: price, EntryID: entry.ID, FilledAt: o.ClosedAt,
+	})
+}
+
+// filledEvent is the order_filled event.
+type filledEvent struct {
+	OrderID       string          `json:"order_id"`
+	AccountID     string          `json:"account_id"`
+	ClientOrderID string          `json:"client_order_id,omitempty"`
+	Symbol        ledger.Asset    `json:"symbol"`
+	Side          ledger.Side     `json:"side"`
+	Quantity      decimal.Decimal `json:"qty"`
+	Price         decimal.Decimal `json:"price"`
+	EntryID       int64           `json:"entry_id"`
+	FilledAt      time.Time       `json:"filled_at"`
 }
 
 // rejectionFor turns the ledger errors a client can cause into rejections,

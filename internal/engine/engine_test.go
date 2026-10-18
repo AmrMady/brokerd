@@ -451,3 +451,25 @@ func TestSellsNeedFeeRates(t *testing.T) {
 	wantStatus(t, h.place(t, market(alice, ledger.Sell, "1")), orders.Rejected, "regulatory fee rates aren't set up")
 	h.wantBalance(t, alice, "AAPL", "1", "0")
 }
+
+// A fill writes its entry_posted event, then its order_filled event, in the
+// same transaction.
+func TestFillsWriteEvents(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, engine.Config{})
+	alice := h.account(t, "10000")
+	h.quote("AAPL", "100.00", "100.10")
+	o := h.place(t, market(alice, ledger.Buy, "2"))
+
+	rows, err := h.pool.Query(h.ctx, `SELECT type, key, payload->>'order_id', payload->>'price' FROM outbox WHERE payload->>'kind' = 'trade_fill' OR type = 'order_filled' ORDER BY seq`)
+	noErr(t, err)
+	type event struct{ Type, Key, OrderID, Price *string }
+	events, err := pgx.CollectRows(rows, pgx.RowToStructByPos[event])
+	noErr(t, err)
+	if len(events) != 2 || *events[0].Type != "entry_posted" || *events[1].Type != "order_filled" {
+		t.Fatalf("events %+v, want the fill's entry then the order", events)
+	}
+	if f := events[1]; *f.Key != alice || *f.OrderID != o.ID || *f.Price != "100.1" {
+		t.Errorf("order_filled key %s order %s price %s", *f.Key, *f.OrderID, *f.Price)
+	}
+}

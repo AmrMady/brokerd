@@ -13,6 +13,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
+
+	"github.com/AmrMady/brokerd/internal/outbox"
 )
 
 type posting struct {
@@ -211,6 +213,9 @@ func (p *pendingEntry) finish(ctx context.Context, tx pgx.Tx, extra map[int64]ch
 	if err != nil {
 		return Entry{}, fmt.Errorf("insert journal lines: %w", err)
 	}
+	if err = p.publish(ctx, tx, lineVersions); err != nil {
+		return Entry{}, err
+	}
 
 	lines := slices.Clone(p.lines)
 	sortLines(lines)
@@ -262,4 +267,39 @@ func scanLine(row pgx.CollectableRow) (Line, error) {
 	var l Line
 	err := row.Scan(&l.AccountID, &l.Asset, &l.Amount)
 	return l, err
+}
+
+// postedEvent is the entry_posted event. Each line has the version its
+// ledger account reached, so a consumer can tell the order of an account's
+// postings.
+type postedEvent struct {
+	EntryID         int64             `json:"entry_id"`
+	Kind            Kind              `json:"kind"`
+	ReversesEntryID int64             `json:"reverses_entry_id,omitempty"`
+	CreatedAt       time.Time         `json:"created_at"`
+	Metadata        map[string]string `json:"metadata"`
+	Lines           []postedLine      `json:"lines"`
+}
+
+type postedLine struct {
+	AccountID string          `json:"account_id"`
+	Asset     Asset           `json:"asset"`
+	Amount    decimal.Decimal `json:"amount"`
+	Version   int64           `json:"version"`
+}
+
+// publish adds the entry_posted event to the outbox, keyed by the entry's
+// customer account. Every entry moves its customer's cash, whose row the
+// posting holds locked until it commits, so an account's events can't
+// reach the outbox in a different order than they commit.
+func (p *pendingEntry) publish(ctx context.Context, tx pgx.Tx, versions []int64) error {
+	e := postedEvent{EntryID: p.id, Kind: p.kind, ReversesEntryID: p.reverses, CreatedAt: p.createdAt, Metadata: p.metadata}
+	for i, l := range p.lines {
+		e.Lines = append(e.Lines, postedLine{l.AccountID, l.Asset, l.Amount, versions[i]})
+	}
+	key := "system"
+	if customers := customerAccounts(p.lines); len(customers) > 0 {
+		key = customers[0]
+	}
+	return outbox.Add(ctx, tx, outbox.EntryPosted, key, e)
 }
