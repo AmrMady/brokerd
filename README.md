@@ -1,8 +1,30 @@
 # brokerd
 
-A brokerage backend in Go, built as a paper-trading system: a double-entry
-ledger, market data, and an order engine. The ledger, market data and
-engine are done; the API is next.
+A brokerage backend in Go, run as a paper-trading system: a double-entry
+ledger in Postgres, a market data pipeline, an order engine that fills
+against live quotes, and an HTTP and WebSocket API. The interesting parts
+are the ones a real broker can't get wrong: money that always balances,
+orders that can't fill twice or after they're canceled, retries that are
+always safe, and a market data stream where a slow client can only hurt
+itself.
+
+```mermaid
+flowchart LR
+    feed["Feed: simulator, CSV replay<br/>or another brokerd"] --> seq[Sequencer]
+    seq --> quotes[Quote cache]
+    seq --> engine[Engine]
+    seq --> bars[1s and 1m bars]
+    seq --> hub[Hub]
+    bars --> hub
+    bars --> store[Bar store]
+    quotes --> engine
+    hub --> ws[WebSocket clients]
+    api[HTTP API] --> engine
+    api --> quotes
+    api --> store
+    engine --> pg[("Postgres: ledger,<br/>orders, idempotency keys")]
+    api --> pg
+```
 
 ## Status
 
@@ -17,17 +39,84 @@ Done:
 - Market data: a seeded random-walk simulator and CSV replay, per-symbol
   sequence checks, a lock-free latest-quote cache, 1s and 1m OHLCV bars by
   event time, a WebSocket stream that drops and then disconnects slow
-  clients, and a relay that streams from another brokerd, all run by
-  `brokerd serve`.
+  clients, and a relay that streams from another brokerd.
 - Paper trading: market and limit orders, day and GTC, filled against the
   latest quotes, with holds, cancels, expiry at the close, a market calendar
   for T+1 settlement, and positions with average cost and unrealized gains.
+- API and operations: REST endpoints with per-account API keys, safe retries
+  with `Idempotency-Key`, one JSON error format, request IDs, structured
+  logs, health and readiness checks, Prometheus metrics, an OpenAPI spec,
+  graceful shutdown, Docker, and a load test.
 
 Planned:
 
-- REST API, metrics, OpenAPI spec
 - Transactional outbox to Kafka
 - Later: order book and matching engine, risk checks, corporate actions
+
+## Quick start
+
+```bash
+make run    # Postgres, migrations and brokerd on :8080 (set BROKERD_PORT to change it)
+```
+
+The compose setup sets the regulatory fees to zero so sells work out of the
+box. Then, in another terminal:
+
+```bash
+curl -s -X POST localhost:8080/v1/accounts
+# {"account":{"id":"...","number":"...","status":"active",...},"api_key":"bk_..."}
+ACCOUNT=...
+AUTH="Authorization: Bearer bk_..."
+
+curl -s -X POST localhost:8080/v1/accounts/$ACCOUNT/deposits -H "$AUTH" \
+  -H "Idempotency-Key: deposit-1" -d '{"amount":"10000"}'
+curl -s -X POST localhost:8080/v1/accounts/$ACCOUNT/orders -H "$AUTH" \
+  -d '{"symbol":"AAPL","side":"buy","type":"market","time_in_force":"day","qty":"10"}'
+curl -s -X POST localhost:8080/v1/accounts/$ACCOUNT/orders -H "$AUTH" \
+  -d '{"symbol":"AAPL","side":"sell","type":"limit","time_in_force":"gtc","qty":"5","limit_price":"999"}'
+curl -s localhost:8080/v1/accounts/$ACCOUNT/positions -H "$AUTH"
+curl -s localhost:8080/v1/accounts/$ACCOUNT/activities -H "$AUTH"
+curl -s localhost:8080/v1/quotes/AAPL
+curl -s "localhost:8080/v1/bars/AAPL?timeframe=1m"
+```
+
+And the stream, with any WebSocket client:
+
+```bash
+websocat ws://localhost:8080/v1/stream
+{"action":"subscribe","quotes":["AAPL"],"bars":["AAPL"]}
+```
+
+## API
+
+The endpoints are described in [openapi.yaml](openapi.yaml), which a test
+checks against the server's routes.
+
+- Opening an account returns its API key, once. Only its SHA-256 is stored.
+  Everything under `/v1/accounts/{account}` needs that account's key; a key
+  for another account gets 404, so keys can't be used to find accounts.
+- Every request that changes something takes an `Idempotency-Key`. The first
+  request with a key claims it in a short transaction, under an advisory
+  lock on the key, runs, and stores its response; a retry gets the stored
+  response back with `Idempotent-Replayed: true`. A retry while the first is
+  still running gets 409, the same key with a different request gets 422,
+  and a 5xx isn't stored, so it can be retried. A claim left by a crashed
+  server can be taken over after a minute. Keys are kept for a day in a
+  table partitioned by day, so old keys go by dropping a partition. The key
+  is also passed down as the ledger's idempotency key, or as an order's
+  client order ID, so even a retry that runs again can't move money twice.
+- Errors are always `{"error": {"code", "message", "request_id"}}`, with the
+  status and code chosen from the domain error. Internal errors don't say
+  what went wrong; the log does, under the same request ID.
+- Each request gets an `X-Request-Id`, the client's if it sent a valid one,
+  and one structured log line. `/healthz` says the process is up; `/readyz`
+  checks the database and says 503 once shutdown starts. `/metrics` has
+  Prometheus metrics: events per second, sequence gaps, hub drops and
+  disconnects, place-to-fill and ledger post latency, and request latency
+  by route.
+- On SIGTERM, brokerd reports not ready, stops taking requests and finishes
+  the ones in flight while quotes still flow, then stops the feed and the
+  engine, closes the WebSocket clients, and closes the database pool last.
 
 ## Ledger
 
@@ -244,37 +333,82 @@ losing about 2.8 messages for every trade published, it takes about 31 µs:
 slow clients barely touch the publisher. Run it with
 `go test -run '^$' -bench HubFanOut ./internal/stream`.
 
-## Running
+## Load test
 
-`brokerd serve` runs the market data pipeline and streams it at
-`ws://localhost:8080/v1/stream`:
+`cmd/loadtest` runs traders, each with its own account, placing market buys,
+market sells and limit buys that rest and are then canceled. Against
+`make run` on an Apple M4 Pro, with Postgres in Docker:
 
-```text
-feed -> sequencer -> 1s and 1m bars -> hub -> WebSocket clients
-                  -> hub
-```
+| Traders | Requests/s | Market order p50 / p95 / p99 | Limit order p50 | Cancel p50 |
+|---------|------------|------------------------------|-----------------|------------|
+| 10      | 630        | 17.7 / 72.1 / 125 ms         | 4.2 ms          | 2.9 ms     |
+| 50      | 544        | 104 / 200 / 285 ms           | 84.6 ms         | 42.2 ms    |
+
+Every request succeeded. Market orders are slower, and get slower with more
+traders, because every fill updates the same two rows: the clearing
+account's USD and AAPL balances. Row locks are held until commit, so fills
+queue on those rows, and fills top out at about 300 per second. Orders that
+only place or release a hold, on the trader's own rows, stay fast. That's
+the first thing I'd change for production (see below).
 
 ```bash
-make serve      # simulated feed
-go run ./cmd/brokerd serve -feed replay -file events.csv -speed 10
-go run ./cmd/brokerd serve -feed relay -upstream ws://localhost:8080/v1/stream -addr :8081
+go run ./cmd/loadtest -url http://localhost:8080 -workers 50 -duration 30s
 ```
 
-Connect with any WebSocket client, for example
-`websocat ws://localhost:8080/v1/stream`, and send a subscribe request. A
-replay serves until its file runs out, flushing its last bars. On SIGINT or
-SIGTERM, serve stops the feed and the HTTP server, sends WebSocket clients
-a going-away close, waits for them, and logs sequence gaps, late trades and
-dropped messages.
+## Design decisions
 
-The ledger needs Postgres:
+- Double-entry, because a balance that can't be explained isn't a balance.
+  Every change is an entry whose lines sum to zero per asset, so `brokerd
+  reconcile` can rebuild every balance from the journal and prove nothing was
+  lost or made up.
+- Row locks rather than optimistic retries. Postings touch accounts that are
+  contended by nature (a customer's cash, the clearing account), where
+  optimistic writes would mostly fail and retry. Locks taken in a fixed order
+  (the order's row, the account, then ledger rows sorted by kind and id)
+  queue writers instead, and can't deadlock.
+- Holds, so the money or shares for an open order can't be spent twice, and
+  partial fills can't use more than the order reserved.
+- Idempotency in Postgres, in the same database as the effect, rather than
+  in Redis: no window where one is written and the other isn't.
+- Slow WebSocket clients lose their oldest messages and are then cut off,
+  because the feed can't wait for them and the newest price is the one that
+  matters.
+- The quote cache was chosen by benchmark (above), and bars go by event time
+  with a grace period, so late trades land in the right bar or are counted,
+  never silently moved.
+
+## What I'd change for production
+
+- Shard the clearing account into several, picked by a hash of the customer,
+  or post the system side of fills to a queue and apply it in batches, to
+  get rid of the hot rows the load test shows.
+- Partition the journal, orders and activity by account, and archive old
+  entries.
+- Spread symbols across engines. Two engines on one database are already
+  safe, since each fill is a compare-and-set, but they'd do the same work.
+- A real bank integration behind the transfer lifecycle that's already
+  there, corporate actions (splits, dividends), and more than one currency.
+- Key rotation and revocation, scopes, and rate limits for the API.
+- Bars stored rather than kept in memory, and a vendor's feed behind the
+  same `Feed` interface.
+
+## Running
+
+`brokerd serve` runs the API, the engine and the market data pipeline. It
+needs `DATABASE_URL` for the API and the engine; without it, it only serves
+market data, which is all a relay needs.
 
 ```bash
 make db-up      # Postgres in Docker
 make migrate
-make reconcile
-make settle     # settle trades due today
+make serve      # simulated feed, with the Makefile's local DATABASE_URL
+go run ./cmd/brokerd serve -feed replay -file events.csv -speed 10
+DATABASE_URL= go run ./cmd/brokerd serve -feed relay -upstream ws://localhost:8080/v1/stream -addr :8081
 ```
+
+A replay serves until its file runs out, flushing its last bars. Other
+commands: `brokerd reconcile` checks the ledger, and `brokerd settle`
+settles trades due today.
 
 Sells need regulatory fee rates. Add each rate the SEC and FINRA publish,
 with the date it takes effect. The SEC rate is per dollar sold, so $27.80
@@ -300,6 +434,7 @@ go run ./cmd/brokerd holiday 2026-11-27 "Day after Thanksgiving" 13:00
 make test       # needs Docker, the tests start Postgres with testcontainers
 make test-short # unit tests only
 make lint
+make bench
 ```
 
 Set `BROKERD_TEST_DATABASE_URL` to run the tests against an existing
