@@ -109,12 +109,13 @@ checks against the server's routes.
   transaction, under an advisory lock on the key, runs, and stores its
   response; a retry gets the stored response back with
   `Idempotent-Replayed: true`. A retry while the first is still running gets
-  409, the same key with a different request gets 422, and a 5xx isn't
-  stored, so it can be retried. A claim left by a crashed server can be
-  taken over after a minute. Keys are kept for a day in a table partitioned
-  by day, so old keys go by dropping a partition. The key is also passed
-  down as the ledger's idempotency key, or as an order's client order ID, so
-  even a retry that runs again can't move money twice.
+  409, and the same key with a different request gets 422. A 5xx, or a
+  request whose client went away, isn't stored, so it can be retried. A
+  claim left by a crashed server can be taken over after a minute. Keys are
+  kept for a day in a table partitioned by day, so old keys go by dropping a
+  partition. The key is also passed down as the ledger's idempotency key, or
+  as an order's client order ID, so even a retry that runs again can't move
+  money twice.
 - Opening an account refuses an `Idempotency-Key`. There's no account yet
   to scope it to, so the stored response, API key included, would be
   replayed to anyone sending the same key.

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,12 +20,13 @@ import (
 )
 
 // testHandler counts its calls and answers with the count. It can be made
-// to fail, or to wait until released.
+// to fail, to find its client gone, or to wait until released.
 type testHandler struct {
-	calls   atomic.Int32
-	fail    atomic.Bool
-	started chan struct{}
-	release chan struct{}
+	calls    atomic.Int32
+	fail     atomic.Bool
+	canceled atomic.Bool
+	started  chan struct{}
+	release  chan struct{}
 }
 
 func (h *testHandler) serve(w http.ResponseWriter, _ *http.Request) error {
@@ -35,6 +37,9 @@ func (h *testHandler) serve(w http.ResponseWriter, _ *http.Request) error {
 	}
 	if h.fail.Load() {
 		return fmt.Errorf("handler failed")
+	}
+	if h.canceled.Load() {
+		return context.Canceled
 	}
 	writeJSON(w, http.StatusCreated, map[string]int32{"call": n})
 	return nil
@@ -148,6 +153,22 @@ func TestIdempotentServerErrors(t *testing.T) {
 	h.fail.Store(false)
 	if status, body, _ := post(t, url+"/things/a", "k1", `{}`); status != http.StatusCreated || body != `{"call":2}` {
 		t.Errorf("retry after a server error: %d %s, want it run again", status, body)
+	}
+}
+
+// A request whose client went away may not have had its effect, so, like a
+// server error, it isn't kept and a retry runs it.
+func TestIdempotentCanceled(t *testing.T) {
+	t.Parallel()
+	h := &testHandler{}
+	url, _ := idempotentServer(t, h)
+	h.canceled.Store(true)
+	if status, _, _ := post(t, url+"/things/a", "k1", `{}`); status != statusClientClosed {
+		t.Fatalf("canceled handler: %d", status)
+	}
+	h.canceled.Store(false)
+	if status, body, _ := post(t, url+"/things/a", "k1", `{}`); status != http.StatusCreated || body != `{"call":2}` {
+		t.Errorf("retry after a canceled request: %d %s, want it run again", status, body)
 	}
 }
 

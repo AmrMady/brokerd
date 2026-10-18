@@ -23,6 +23,11 @@ func newError(status int, code, format string, args ...any) *apiError {
 	return &apiError{status: status, code: code, message: fmt.Sprintf(format, args...)}
 }
 
+// statusClientClosed is for a request whose client went away before it was
+// answered. It isn't a standard status, and the client never sees it, but
+// it keeps these apart from server errors in the logs and metrics.
+const statusClientClosed = 499
+
 var (
 	errUnauthorized = newError(http.StatusUnauthorized, "unauthorized", "missing or invalid API key")
 	errNotFound     = newError(http.StatusNotFound, "not_found", "not found")
@@ -37,8 +42,7 @@ func errorFor(err error) *apiError {
 	case errors.As(err, &e):
 		return e
 	case errors.Is(err, context.Canceled):
-		// The client went away; nginx's 499 says so in the metrics.
-		return newError(499, "canceled", "the request was canceled")
+		return newError(statusClientClosed, "canceled", "the request was canceled")
 	case errors.Is(err, ledger.ErrAccountNotFound), errors.Is(err, orders.ErrNotFound),
 		errors.Is(err, ledger.ErrTransferNotFound):
 		return newError(http.StatusNotFound, "not_found", "%s", err)

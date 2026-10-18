@@ -28,8 +28,9 @@ const (
 // Idempotency-Key header. The first request with a key claims it, runs, and
 // stores its response; a retry gets the stored response back, with an
 // Idempotent-Replayed header. A retry while the first is still running gets
-// 409, and the same key with a different request gets 422. A 5xx response
-// isn't stored, so the request can be retried.
+// 409, and the same key with a different request gets 422. A 5xx response,
+// or a request whose client went away, isn't stored, so the request can be
+// retried.
 //
 // Keys are scoped to the account in the path, so h must be on a route
 // under one, behind authorized.
@@ -155,11 +156,13 @@ func (s *Server) claim(ctx context.Context, scope, key string, fp []byte) (time.
 var errInProgress = newError(http.StatusConflict, "request_in_progress",
 	"a request with this Idempotency-Key is still running; retry later")
 
-// finish stores the response, or gives the key back after a server error
-// so the request can be retried.
+// finish stores the response, or gives the key back when the request may
+// not have had its effect, after a server error or when its client went
+// away, so it can be retried. Running it again is safe: the key also goes
+// down as the ledger's idempotency key or the order's client order ID.
 func (s *Server) finish(ctx context.Context, scope, key string, claimedAt time.Time, rec *bufferedResponse) error {
 	var err error
-	if rec.status >= http.StatusInternalServerError {
+	if rec.status >= http.StatusInternalServerError || rec.status == statusClientClosed {
 		_, err = s.cfg.Pool.Exec(ctx, `
 			DELETE FROM idempotent_requests WHERE scope = $1 AND key = $2 AND created_at = $3`,
 			scope, key, claimedAt)
