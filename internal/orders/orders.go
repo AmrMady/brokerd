@@ -167,6 +167,11 @@ func (o Order) Open() bool {
 	return o.Status == Accepted
 }
 
+// PastExpiry reports whether o is a day order whose session closed by now.
+func (o Order) PastExpiry(now time.Time) bool {
+	return !o.ExpiresAt.IsZero() && !now.Before(o.ExpiresAt)
+}
+
 const columns = `id::text, account_id::text, COALESCE(client_order_id, ''), symbol, side, type, time_in_force,
 	quantity, limit_price, status, COALESCE(reject_reason, ''), COALESCE(hold_id, 0),
 	expires_at, fill_price, COALESCE(fill_entry_id, 0), created_at, updated_at, closed_at`

@@ -103,7 +103,9 @@ func (e *Engine) match(ctx context.Context, symbol ledger.Asset) {
 }
 
 // fillResting fills a resting order at price, unless a cancel or an expiry
-// got to it first, or the market has closed since it was matched.
+// got to it first, or the market has closed since it was matched. A day
+// order whose session has closed is expired instead, even if the expiry
+// loop hasn't got to it yet.
 func (e *Engine) fillResting(ctx context.Context, symbol ledger.Asset, id string, price decimal.Decimal) error {
 	var (
 		closed bool
@@ -119,6 +121,10 @@ func (e *Engine) fillResting(ctx context.Context, symbol ledger.Asset, id string
 			return nil
 		}
 		now := e.cfg.Now()
+		if o.PastExpiry(now) {
+			closed = true
+			return expireLocked(ctx, tx, o)
+		}
 		if !e.cfg.Calendar.IsOpen(now) {
 			return nil
 		}
@@ -179,18 +185,24 @@ func (e *Engine) expire(ctx context.Context, id string, now time.Time) error {
 			return err
 		}
 		symbol = o.Symbol
-		if !o.Open() || o.ExpiresAt.After(now) {
+		if !o.Open() || !o.PastExpiry(now) {
 			return nil
 		}
-		if _, err = ledger.ReleaseHold(ctx, tx, o.HoldID); err != nil {
-			return err
-		}
-		_, err = orders.Expire(ctx, tx, id)
-		return err
+		return expireLocked(ctx, tx, o)
 	})
 	if err == nil {
 		e.unbook(symbol, id)
 	}
+	return err
+}
+
+// expireLocked expires o, which the caller has locked, and releases its
+// hold.
+func expireLocked(ctx context.Context, tx pgx.Tx, o orders.Order) error {
+	if _, err := ledger.ReleaseHold(ctx, tx, o.HoldID); err != nil {
+		return err
+	}
+	_, err := orders.Expire(ctx, tx, o.ID)
 	return err
 }
 

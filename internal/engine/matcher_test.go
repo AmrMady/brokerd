@@ -175,6 +175,26 @@ func TestDayOrdersExpire(t *testing.T) {
 	wantStatus(t, h.waitFor(t, alice, gtc.ID, orders.Accepted), orders.Accepted, "")
 }
 
+// A day order still open after its close, because expiry hasn't got to it
+// yet, expires instead of filling in a later session.
+func TestDayOrdersDontFillAfterTheirClose(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, engine.Config{})
+	alice := h.account(t, "1000")
+	day := limit(alice, ledger.Buy, "1", "99")
+	day.TimeInForce = orders.Day
+	o := h.place(t, day)
+
+	h.setNow(time.Date(2026, 10, 19, 14, 0, 0, 0, time.UTC)) // Monday, 10:00 in New York
+	h.quote("AAPL", "97", "98")
+	h.engine.MatchForTest(h.ctx, "AAPL")
+	got, err := h.engine.Order(h.ctx, alice, o.ID)
+	noErr(t, err)
+	wantStatus(t, got, orders.Expired, "")
+	h.wantBalance(t, alice, ledger.USD, "1000", "0")
+	h.requireReconciled(t)
+}
+
 // placeResting places n resting buys of one share at 99.
 func (h *harness) placeResting(t *testing.T, account string, n int) []string {
 	t.Helper()
