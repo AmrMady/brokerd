@@ -59,6 +59,9 @@ func newClient(t *testing.T) *client {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err = api.MaintainIdempotency(t.Context(), pool, time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	eng, err := engine.New(t.Context(), engine.Config{Pool: pool, Quotes: quotes, Calendar: calendar.New()})
 	if err != nil {
 		t.Fatal(err)

@@ -150,6 +150,12 @@ func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.L
 		if eng, err = startEngine(ctx, cfg, pool, quotes, logger); err != nil {
 			return err
 		}
+		if err = api.MaintainIdempotency(ctx, pool, time.Now()); err != nil {
+			return err
+		}
+		maintainCtx, stopMaintaining := context.WithCancel(context.Background())
+		defer stopMaintaining()
+		go maintain(maintainCtx, pool, logger)
 		handlers = append(handlers, eng) // after the cache, so it reads the newest quote
 		apiCfg.Pool, apiCfg.Engine = pool, eng
 	}
@@ -220,6 +226,23 @@ func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.L
 		"bars", s.Bars+m.Bars, "late_1s", s.Late, "late_1m", m.Late,
 		"dropped", h.Dropped, "disconnected", h.Disconnected)
 	return err
+}
+
+// maintain keeps the idempotency partitions current, hourly, until ctx is
+// done.
+func maintain(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			if err := api.MaintainIdempotency(ctx, pool, now); err != nil && ctx.Err() == nil {
+				logger.Error("maintain idempotency keys", "error", err)
+			}
+		}
+	}
 }
 
 // startEngine makes sure the feed's symbols can be traded and starts the

@@ -65,14 +65,16 @@ func New(cfg Config) *Server {
 	if cfg.Pool == nil || cfg.Engine == nil {
 		return s
 	}
-	s.route("POST /v1/accounts", s.createAccount)
+	// Every request that changes something can be retried safely with an
+	// Idempotency-Key.
+	s.route("POST /v1/accounts", s.idempotent(s.createAccount))
 	s.route("GET /v1/accounts/{account}", s.authorized(s.getAccount))
-	s.route("POST /v1/accounts/{account}/deposits", s.authorized(s.deposit))
-	s.route("POST /v1/accounts/{account}/withdrawals", s.authorized(s.withdraw))
-	s.route("POST /v1/accounts/{account}/orders", s.authorized(s.placeOrder))
+	s.route("POST /v1/accounts/{account}/deposits", s.authorized(s.idempotent(s.deposit)))
+	s.route("POST /v1/accounts/{account}/withdrawals", s.authorized(s.idempotent(s.withdraw)))
+	s.route("POST /v1/accounts/{account}/orders", s.authorized(s.idempotent(s.placeOrder)))
 	s.route("GET /v1/accounts/{account}/orders", s.authorized(s.listOrders))
 	s.route("GET /v1/accounts/{account}/orders/{order}", s.authorized(s.getOrder))
-	s.route("DELETE /v1/accounts/{account}/orders/{order}", s.authorized(s.cancelOrder))
+	s.route("DELETE /v1/accounts/{account}/orders/{order}", s.authorized(s.idempotent(s.cancelOrder)))
 	s.route("GET /v1/accounts/{account}/positions", s.authorized(s.positions))
 	s.route("GET /v1/accounts/{account}/activities", s.authorized(s.activities))
 	return s
