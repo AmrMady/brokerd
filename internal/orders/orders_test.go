@@ -142,8 +142,10 @@ func TestLifecycle(t *testing.T) {
 	if got.Status != orders.Filled || got.ID != o.ID {
 		t.Errorf("Get = %+v, want the filled order", got)
 	}
-	if _, err = orders.Get(s.ctx, s.pool, "00000000-0000-0000-0000-000000000099"); !errors.Is(err, orders.ErrNotFound) {
-		t.Errorf("Get of an unknown order: %v, want %v", err, orders.ErrNotFound)
+	for _, id := range []string{"00000000-0000-0000-0000-000000000099", "not-an-id"} {
+		if _, err = orders.Get(s.ctx, s.pool, id); !errors.Is(err, orders.ErrNotFound) {
+			t.Errorf("Get(%q): %v, want %v", id, err, orders.ErrNotFound)
+		}
 	}
 }
 

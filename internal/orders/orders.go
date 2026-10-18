@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 	"unicode"
 
@@ -282,10 +283,24 @@ func transition(ctx context.Context, tx pgx.Tx, id string, from, to Status, set 
 	return o, fmt.Errorf("%w: %s is %s", errNotNew, id, o.Status)
 }
 
+var idPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// checkID turns an ID that can't be an order's into ErrNotFound, rather than
+// a Postgres syntax error.
+func checkID(id string) error {
+	if !idPattern.MatchString(id) {
+		return fmt.Errorf("%w: %q", ErrNotFound, id)
+	}
+	return nil
+}
+
 // Lock locks an order's row for the rest of tx and returns it. Callers lock
 // an order before touching its hold in the ledger, so a fill and a cancel of
 // the same order never take their locks in different orders.
 func Lock(ctx context.Context, tx pgx.Tx, id string) (Order, error) {
+	if err := checkID(id); err != nil {
+		return Order{}, err
+	}
 	o, err := scan(tx.QueryRow(ctx, `SELECT `+columns+` FROM orders WHERE id = $1 FOR UPDATE`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Order{}, fmt.Errorf("%w: %s", ErrNotFound, id)
@@ -298,6 +313,9 @@ func Lock(ctx context.Context, tx pgx.Tx, id string) (Order, error) {
 
 // Get returns an order.
 func Get(ctx context.Context, q ledger.Querier, id string) (Order, error) {
+	if err := checkID(id); err != nil {
+		return Order{}, err
+	}
 	o, err := scan(q.QueryRow(ctx, `SELECT `+columns+` FROM orders WHERE id = $1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Order{}, fmt.Errorf("%w: %s", ErrNotFound, id)
@@ -320,6 +338,9 @@ func List(ctx context.Context, q ledger.Querier, accountID string, open bool, be
 	}
 	var cursor *string
 	if before != "" {
+		if err := checkID(before); err != nil {
+			return nil, fmt.Errorf("%w: page cursor %q", ErrInvalid, before)
+		}
 		cursor = &before
 	}
 	rows, err := q.Query(ctx, `
