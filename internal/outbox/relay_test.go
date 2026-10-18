@@ -1,10 +1,14 @@
 package outbox_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -221,6 +225,85 @@ func TestOneRelayLeads(t *testing.T) {
 	stopB()
 }
 
+// A relay that led and then lost its connection reconnects after the first
+// backoff again, rather than one that kept doubling over its lifetime.
+func TestRelayBackoffStartsOverAfterLeading(t *testing.T) {
+	t.Parallel()
+	db := newOutboxDB(t)
+	var logs lockedBuffer
+	relay, err := outbox.NewRelay(outbox.RelayConfig{
+		DatabaseURL: db.url, Publisher: &fakePublisher{}, Interval: 10 * time.Millisecond,
+		Backoff: 10 * time.Millisecond, Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- relay.Run(ctx) }()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	var pid int32
+	for range 3 {
+		previous := pid
+		eventually(t, "the relay to lead", func() bool {
+			pid = db.leaderPID(t)
+			return pid != 0 && pid != previous
+		})
+		if _, err = db.pool.Exec(t.Context(), `SELECT pg_terminate_backend($1)`, pid); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eventually(t, "the relay to lead again", func() bool { return db.leaderPID(t) != pid && db.leaderPID(t) != 0 })
+	for line := range strings.Lines(logs.String()) {
+		var m struct {
+			Msg     string `json:"msg"`
+			RetryIn int64  `json:"retry_in"`
+		}
+		if err = json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatal(err)
+		}
+		if m.Msg == "outbox relay lost its database connection" && time.Duration(m.RetryIn) != 10*time.Millisecond {
+			t.Errorf("retry in %s after leading, want the first backoff", time.Duration(m.RetryIn))
+		}
+	}
+}
+
+// leaderPID returns the backend holding the leader lock, or 0.
+func (db outboxDB) leaderPID(t *testing.T) int32 {
+	t.Helper()
+	var pid int32
+	err := db.pool.QueryRow(t.Context(), `
+		SELECT COALESCE(max(pid), 0) FROM pg_locks
+		WHERE locktype = 'advisory' AND granted
+		  AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`).Scan(&pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pid
+}
+
+// lockedBuffer is a buffer a logger can write to while the test reads it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 func TestRelayPurgesOldEvents(t *testing.T) {
 	t.Parallel()
 	db := newOutboxDB(t)
@@ -245,6 +328,7 @@ func TestNewRelayRejectsBadConfig(t *testing.T) {
 		{Publisher: &fakePublisher{}},
 		{DatabaseURL: "postgres://x"},
 		{DatabaseURL: "postgres://x", Publisher: &fakePublisher{}, BatchSize: -1},
+		{DatabaseURL: "postgres://x", Publisher: &fakePublisher{}, Backoff: -1},
 	} {
 		if _, err := outbox.NewRelay(cfg); err == nil {
 			t.Errorf("NewRelay(%+v) succeeded", cfg)

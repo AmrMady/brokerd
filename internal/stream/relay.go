@@ -195,9 +195,11 @@ func (r *Relay) connect(ctx context.Context, h marketdata.Handler) (streamed boo
 		if readErr != nil {
 			return streamed, fmt.Errorf("read from upstream: %w", readErr)
 		}
+		// A frame that can't be read is this connection's problem, like a
+		// failed read: the relay reconnects.
 		var msgs []relayMessage
 		if err = json.Unmarshal(data, &msgs); err != nil {
-			return streamed, fmt.Errorf("%w: %w", errNotAHub, err)
+			return streamed, fmt.Errorf("decode upstream frame: %w", err)
 		}
 		streamed = true
 		for _, m := range msgs {

@@ -21,13 +21,15 @@ import (
 
 // upstream serves whichever hub is current, so a test can restart it. Its
 // first stall connections are held open without being read, so pings to
-// them go unanswered.
+// them go unanswered, and the bad ones after those get a frame that isn't
+// JSON.
 type upstream struct {
 	t     *testing.T
 	cfg   stream.Config
 	hub   atomic.Pointer[stream.Hub]
 	conns atomic.Int32
 	stall int32
+	bad   int32
 }
 
 func newUpstream(t *testing.T, cfg stream.Config) (*upstream, string) {
@@ -63,7 +65,8 @@ func (u *upstream) restart() {
 
 func (u *upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h := u.hub.Load()
-	if u.conns.Add(1) > u.stall {
+	n := u.conns.Add(1)
+	if n > u.stall+u.bad {
 		h.ServeHTTP(w, r)
 		return
 	}
@@ -73,6 +76,11 @@ func (u *upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer closeConn(u.t, conn)
+	if n > u.stall {
+		if err = conn.Write(u.t.Context(), websocket.MessageText, []byte("not json")); err != nil {
+			return
+		}
+	}
 	<-u.t.Context().Done()
 }
 
@@ -243,6 +251,22 @@ func TestRelayReconnectsWhenPingsGoUnanswered(t *testing.T) {
 	u.stall = 1
 	var got events
 	runRelay(t, newRelay(t, stream.RelayConfig{URL: url, Symbols: []string{"AAPL"}, PingInterval: 20 * time.Millisecond}), &got)
+	u.waitSubscribed(t, 2)
+	u.hub.Load().HandleTrade(trade("AAPL", 1))
+	got.wait(t, 1)
+	if n := u.conns.Load(); n != 2 {
+		t.Errorf("connected %d times, want 2", n)
+	}
+}
+
+// A frame the relay can't read is that connection's fault, so it
+// reconnects rather than giving up.
+func TestRelayReconnectsAfterABadFrame(t *testing.T) {
+	t.Parallel()
+	u, url := newUpstream(t, stream.Config{})
+	u.bad = 1
+	var got events
+	runRelay(t, newRelay(t, stream.RelayConfig{URL: url, Symbols: []string{"AAPL"}}), &got)
 	u.waitSubscribed(t, 2)
 	u.hub.Load().HandleTrade(trade("AAPL", 1))
 	got.wait(t, 1)

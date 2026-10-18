@@ -33,7 +33,11 @@ type RelayConfig struct {
 	StandbyInterval time.Duration
 	// Retention is how long published events are kept. Default 7 days.
 	Retention time.Duration
-	Logger    *slog.Logger
+	// Backoff is how long to wait before reconnecting to the database the
+	// first time. It doubles after each failed attempt, up to 30s. Default
+	// 1s.
+	Backoff time.Duration
+	Logger  *slog.Logger
 }
 
 // leaderLock is the advisory lock the leading relay holds. Advisory locks
@@ -59,7 +63,7 @@ func NewRelay(cfg RelayConfig) (*Relay, error) {
 	if cfg.DatabaseURL == "" || cfg.Publisher == nil {
 		return nil, errors.New("outbox relay needs a database URL and a publisher")
 	}
-	if cfg.BatchSize < 0 || cfg.Interval < 0 || cfg.StandbyInterval < 0 || cfg.Retention < 0 {
+	if cfg.BatchSize < 0 || cfg.Interval < 0 || cfg.StandbyInterval < 0 || cfg.Retention < 0 || cfg.Backoff < 0 {
 		return nil, fmt.Errorf("outbox relay config must not be negative: %+v", cfg)
 	}
 	if cfg.BatchSize == 0 {
@@ -74,6 +78,9 @@ func NewRelay(cfg RelayConfig) (*Relay, error) {
 	if cfg.Retention == 0 {
 		cfg.Retention = 7 * 24 * time.Hour
 	}
+	if cfg.Backoff == 0 {
+		cfg.Backoff = time.Second
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)
 	}
@@ -85,13 +92,17 @@ func (r *Relay) Published() uint64 {
 	return r.published.Load()
 }
 
-// Run publishes the outbox until ctx is done.
+// Run publishes the outbox until ctx is done. It reconnects with backoff,
+// which starts over after a session that got as far as leading.
 func (r *Relay) Run(ctx context.Context) error {
-	wait := time.Second
+	wait := r.cfg.Backoff
 	for {
-		err := r.lead(ctx)
+		led, err := r.lead(ctx)
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if led {
+			wait = r.cfg.Backoff
 		}
 		r.cfg.Logger.Warn("outbox relay lost its database connection", "error", err, "retry_in", wait)
 		if err = sleep(ctx, wait); err != nil {
@@ -102,30 +113,28 @@ func (r *Relay) Run(ctx context.Context) error {
 }
 
 // lead connects, waits to become the leader, and publishes until ctx is
-// done or the connection fails.
-func (r *Relay) lead(ctx context.Context) (err error) {
+// done or the connection fails. led reports whether it became the leader.
+func (r *Relay) lead(ctx context.Context) (led bool, err error) {
 	// The pool's parser takes out settings only a pool understands, like
 	// pool_max_conns, which Postgres itself would refuse.
 	cfg, err := pgxpool.ParseConfig(r.cfg.DatabaseURL)
 	if err != nil {
-		return err
+		return false, err
 	}
 	conn, err := pgx.ConnectConfig(ctx, cfg.ConnConfig)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer func() { err = errors.Join(err, conn.Close(context.WithoutCancel(ctx))) }()
 
-	for {
-		var leading bool
-		if err = conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, leaderLock).Scan(&leading); err != nil {
-			return err
+	for !led {
+		if err = conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, leaderLock).Scan(&led); err != nil {
+			return false, err
 		}
-		if leading {
-			break
-		}
-		if err = sleep(ctx, r.cfg.StandbyInterval); err != nil {
-			return err
+		if !led {
+			if err = sleep(ctx, r.cfg.StandbyInterval); err != nil {
+				return false, err
+			}
 		}
 	}
 	r.cfg.Logger.Info("outbox relay is leading")
@@ -134,17 +143,17 @@ func (r *Relay) lead(ctx context.Context) (err error) {
 	for {
 		if time.Since(purged) > time.Hour {
 			if err = r.purge(ctx, conn); err != nil {
-				return err
+				return true, err
 			}
 			purged = time.Now()
 		}
 		var n int
 		if n, err = r.publishBatch(ctx, conn); err != nil {
-			return err
+			return true, err
 		}
 		if n < r.cfg.BatchSize {
 			if err = sleep(ctx, r.cfg.Interval); err != nil {
-				return err
+				return true, err
 			}
 		}
 	}

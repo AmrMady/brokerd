@@ -383,7 +383,9 @@ the relay fell behind, shows up downstream as sequence gaps. When the
 upstream session changes, the relay shifts the new numbers past the ones it
 already passed on. It reconnects with backoff (1s doubling to a minute,
 reset after a connection that streamed) and pings to catch a dead
-connection.
+connection. A frame it can't decode drops that connection, like a failed
+read; only an upstream that isn't a brokerd stream, or that refuses the
+subscription, stops it.
 
 Publishing a trade to 100 subscribers (1,000 clients each subscribed to 10
 of 100 symbols) takes about 21 µs, or 4.7M messages/s, on an Apple M4 Pro.
@@ -409,7 +411,9 @@ window where one is committed and the other isn't.
   take over, which they do as soon as the leader's connection drops. The
   leader reads a batch, publishes it, waits for Kafka to acknowledge every
   event, then marks it published. A relay that dies in between publishes the
-  batch again when it comes back: delivery is at least once.
+  batch again when it comes back: delivery is at least once. A relay that
+  loses its connection reconnects with backoff (1s doubling to 30s, reset
+  after a connection that led).
 - The producer is idempotent, so its own retries can't duplicate or reorder
   events, and an account's events share a partition, so they stay in order.
   A failing broker is retried with backoff while the relay keeps the lead.
