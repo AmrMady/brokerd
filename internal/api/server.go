@@ -18,12 +18,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AmrMady/brokerd/internal/engine"
+	"github.com/AmrMady/brokerd/internal/portfolio"
 )
 
 // Config configures a Server.
 type Config struct {
 	Pool   *pgxpool.Pool
 	Engine *engine.Engine
+	Quotes portfolio.Quotes
 	Logger *slog.Logger
 }
 
@@ -50,6 +52,12 @@ func New(cfg Config) *Server {
 	s.route("GET /v1/accounts/{account}", s.authorized(s.getAccount))
 	s.route("POST /v1/accounts/{account}/deposits", s.authorized(s.deposit))
 	s.route("POST /v1/accounts/{account}/withdrawals", s.authorized(s.withdraw))
+	s.route("POST /v1/accounts/{account}/orders", s.authorized(s.placeOrder))
+	s.route("GET /v1/accounts/{account}/orders", s.authorized(s.listOrders))
+	s.route("GET /v1/accounts/{account}/orders/{order}", s.authorized(s.getOrder))
+	s.route("DELETE /v1/accounts/{account}/orders/{order}", s.authorized(s.cancelOrder))
+	s.route("GET /v1/accounts/{account}/positions", s.authorized(s.positions))
+	s.route("GET /v1/accounts/{account}/activities", s.authorized(s.activities))
 	return s
 }
 

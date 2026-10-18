@@ -154,7 +154,7 @@ func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.L
 			return err
 		}
 		handlers = append(handlers, eng) // after the cache, so it reads the newest quote
-		apiSrv = api.New(api.Config{Pool: pool, Engine: eng, Logger: logger})
+		apiSrv = api.New(api.Config{Pool: pool, Engine: eng, Quotes: quotes, Logger: logger})
 		apiSrv.Handle("GET /v1/stream", hub)
 		handler = apiSrv
 	}

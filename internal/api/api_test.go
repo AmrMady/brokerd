@@ -10,12 +10,16 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 
 	"github.com/AmrMady/brokerd/internal/api"
 	"github.com/AmrMady/brokerd/internal/calendar"
 	"github.com/AmrMady/brokerd/internal/engine"
+	"github.com/AmrMady/brokerd/internal/ledger"
 	"github.com/AmrMady/brokerd/internal/marketdata"
 	"github.com/AmrMady/brokerd/internal/postgres/pgtest"
 )
@@ -38,11 +42,28 @@ func newClient(t *testing.T) *client {
 	t.Helper()
 	pool := pgtest.NewPool(t)
 	quotes := &marketdata.QuoteCache{}
+	err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
+		if err := ledger.AddAsset(t.Context(), tx, "AAPL", 9); err != nil {
+			return err
+		}
+		for _, r := range []ledger.FeeRate{
+			{Fee: ledger.SECFee, EffectiveOn: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)},
+			{Fee: ledger.TAF, EffectiveOn: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC), MaxPerTrade: decimal.NewNullDecimal(decimal.Zero)},
+		} {
+			if err := ledger.AddFeeRate(t.Context(), tx, r); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	eng, err := engine.New(t.Context(), engine.Config{Pool: pool, Quotes: quotes, Calendar: calendar.New()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := api.New(api.Config{Pool: pool, Engine: eng})
+	s := api.New(api.Config{Pool: pool, Engine: eng, Quotes: quotes})
 	srv := httptest.NewServer(s)
 	t.Cleanup(srv.Close)
 	return &client{t: t, url: srv.URL, server: s, pool: pool, quotes: quotes}
