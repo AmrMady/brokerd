@@ -1,8 +1,8 @@
 # brokerd
 
 A brokerage backend in Go, built as a paper-trading system: a double-entry
-ledger, market data, and an order engine. The ledger and market data are
-done; the order engine is next.
+ledger, market data, and an order engine. The ledger, market data and
+engine are done; the API is next.
 
 ## Status
 
@@ -19,10 +19,12 @@ Done:
   event time, a WebSocket stream that drops and then disconnects slow
   clients, and a relay that streams from another brokerd, all run by
   `brokerd serve`.
+- Paper trading: market and limit orders, day and GTC, filled against the
+  latest quotes, with holds, cancels, expiry at the close, a market calendar
+  for T+1 settlement, and positions with average cost and unrealized gains.
 
 Planned:
 
-- Paper trading: market and limit orders filled against live quotes
 - REST API, metrics, OpenAPI spec
 - Transactional outbox to Kafka
 - Later: order book and matching engine, risk checks, corporate actions
@@ -108,6 +110,41 @@ Some notes on how it works:
   off.
 - Ledger functions take a `pgx.Tx`, so a caller can post to the ledger and
   write its own rows in one transaction.
+
+## Trading
+
+An order moves `new -> accepted -> filled | canceled | expired`, or
+`new -> rejected`. Each move is a compare-and-set on its status, and a
+Postgres trigger refuses any other change, so an order can't fill after it
+was canceled, or be both.
+
+- Accepting an order places a hold: shares for a sell, and for a buy cash
+  for the quantity at the limit price, or at the ask plus a 2% collar for a
+  market order, plus the commission, rounded up to the cent. Placing the
+  hold, and filling a market order, happen in a savepoint inside the
+  order's transaction; if the account can't cover the order, or there's no
+  fresh quote, the savepoint is rolled back and the order is stored as
+  rejected, with the reason.
+- Market orders fill at once at the ask or the bid, and so do limit orders
+  the quote already crosses. Other limit orders rest in a per-symbol book,
+  best price first, then oldest first.
+- A quote only marks its symbol for matching; it never waits on the
+  database. A few workers, each owning the symbols that hash to it, check
+  the symbol's book against its latest quote and fill what crosses, at the
+  quote. Each fill is its own transaction, which locks the order's row
+  before anything in the ledger, the same order a cancel or an expiry
+  takes, so they can't deadlock and only one of them wins.
+- A fill's ID, `fill:<order id>`, is its ledger idempotency key, so an order
+  can't post twice, even with two engines on one database. Whatever the
+  fill didn't use of the hold is released in the same transaction.
+- Day orders expire at the close of their session. The market calendar
+  knows weekends, holidays and early closes, and gives each fill its trade
+  date and its T+1 settlement date.
+- On start, the engine loads every open order from Postgres, so a restart
+  loses nothing.
+- Positions come from the ledger: quantity, what isn't held by open sells,
+  cost basis and average cost from the FIFO tax lots, and market value and
+  unrealized gain at the latest bid.
 
 ## Market data
 
