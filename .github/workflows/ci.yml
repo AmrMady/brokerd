@@ -43,3 +43,13 @@ jobs:
           go-version-file: go.mod
       # The tests share the one Postgres service, so fewer packages at once.
       - run: go test -race -p 2 ./...
+
+  docker:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      # Builds both binaries, the outbox's with cgo, and checks they start in
+      # the runtime image.
+      - run: docker build -t brokerd .
+      - run: docker run --rm brokerd serve -h
+      - run: docker run --rm --entrypoint outbox brokerd publish -h
