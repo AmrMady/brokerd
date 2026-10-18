@@ -2,11 +2,12 @@
 
 A brokerage backend in Go, run as a paper-trading system: a double-entry
 ledger in Postgres, a market data pipeline, an order engine that fills
-against live quotes, and an HTTP and WebSocket API. The interesting parts
+against live quotes, an HTTP and WebSocket API, and every posting and fill
+published to Kafka through a transactional outbox. The interesting parts
 are the ones a real broker can't get wrong: money that always balances,
 orders that can't fill twice or after they're canceled, retries that are
-always safe, and a market data stream where a slow client can only hurt
-itself.
+always safe, events that are never lost, and a market data stream where a
+slow client can only hurt itself.
 
 ```mermaid
 flowchart LR
@@ -22,8 +23,11 @@ flowchart LR
     api[HTTP API] --> engine
     api --> quotes
     api --> store
-    engine --> pg[("Postgres: ledger,<br/>orders, idempotency keys")]
+    engine --> pg[("Postgres: ledger, orders,<br/>outbox, idempotency keys")]
     api --> pg
+    pg --> relay[Outbox relay]
+    relay --> kafka[(Kafka)]
+    kafka --> consumers[Consumers]
 ```
 
 ## Status
@@ -47,11 +51,13 @@ Done:
   with `Idempotency-Key`, one JSON error format, request IDs, structured
   logs, health and readiness checks, Prometheus metrics, an OpenAPI spec,
   graceful shutdown, Docker, and a load test.
+- Events: every journal entry and fill written to an outbox in the same
+  transaction, published to Kafka in order by one relay at a time, and
+  consumed once per event.
 
 Planned:
 
-- Transactional outbox to Kafka
-- Later: order book and matching engine, risk checks, corporate actions
+- Order book and matching engine, risk checks, corporate actions
 
 ## Quick start
 
@@ -79,6 +85,9 @@ curl -s localhost:8080/v1/accounts/$ACCOUNT/activities -H "$AUTH"
 curl -s localhost:8080/v1/quotes/AAPL
 curl -s "localhost:8080/v1/bars/AAPL?timeframe=1m"
 ```
+
+Every posting and fill also goes through Kafka; `docker compose logs -f
+outbox-consumer` shows each event once.
 
 And the stream, with any WebSocket client:
 
@@ -333,6 +342,42 @@ losing about 2.8 messages for every trade published, it takes about 31 µs:
 slow clients barely touch the publisher. Run it with
 `go test -run '^$' -bench HubFanOut ./internal/stream`.
 
+## Outbox
+
+Every journal entry writes an `entry_posted` event to the `outbox` table,
+and every fill an `order_filled` event, in the same transaction. An event is
+published if and only if what it describes happened: no dual write, no
+window where one is committed and the other isn't.
+
+- Events are published in `seq` order, and keyed by account. That order is
+  each account's commit order: every posting moves its customer's cash, and
+  holds that row locked until it commits, so a later posting of the same
+  account can't take a `seq` before an earlier one is committed. Each line
+  also carries its ledger account's version.
+- `outbox publish` runs the relay. Each relay holds a connection and tries a
+  Postgres advisory lock; the one that gets it leads, and the others wait to
+  take over, which they do as soon as the leader's connection drops. The
+  leader reads a batch, publishes it, waits for Kafka to acknowledge every
+  event, then marks it published. A relay that dies in between publishes the
+  batch again when it comes back: delivery is at least once.
+- The producer is idempotent, so its own retries can't duplicate or reorder
+  events, and an account's events share a partition, so they stay in order.
+  A failing broker is retried with backoff while the relay keeps the lead.
+- `outbox consume` handles each event inside a Postgres transaction that
+  also records its ID; a redelivered event finds the record and is skipped,
+  and two copies delivered at once wait on each other. The offset is
+  committed only after that transaction, so a crash means redelivery, never
+  loss. A handler that fails is retried rather than skipped, so a
+  partition's events are never handled out of order.
+- Published events are deleted after a week, and consumers forget handled
+  events after a week, longer than Kafka keeps them by default.
+- The Kafka client, confluent-kafka-go, wraps librdkafka and needs cgo, so
+  the outbox has its own binary and `brokerd` stays pure Go.
+
+The tests run the relay and a consumer against Postgres and Kafka in
+containers, and publish everything twice: each event is handled once, in
+its account's order.
+
 ## Load test
 
 `cmd/loadtest` runs traders, each with its own account, placing market buys,
@@ -391,6 +436,9 @@ go run ./cmd/loadtest -url http://localhost:8080 -workers 50 -duration 30s
 - Key rotation and revocation, scopes, and rate limits for the API.
 - Bars stored rather than kept in memory, and a vendor's feed behind the
   same `Feed` interface.
+- Read the outbox from Postgres's write-ahead log (logical replication)
+  rather than polling it, put event schemas in a registry, and send events
+  a consumer can't parse to a dead-letter topic instead of logging them.
 
 ## Running
 
@@ -409,6 +457,14 @@ DATABASE_URL= go run ./cmd/brokerd serve -feed relay -upstream ws://localhost:80
 A replay serves until its file runs out, flushing its last bars. Other
 commands: `brokerd reconcile` checks the ledger, and `brokerd settle`
 settles trades due today.
+
+The outbox publisher and a consumer, against Kafka from `docker compose up
+kafka` (port 9094):
+
+```bash
+KAFKA_BROKERS=localhost:9094 go run ./cmd/outbox publish
+KAFKA_BROKERS=localhost:9094 go run ./cmd/outbox consume -group audit
+```
 
 Sells need regulatory fee rates. Add each rate the SEC and FINRA publish,
 with the date it takes effect. The SEC rate is per dollar sold, so $27.80
@@ -431,7 +487,7 @@ go run ./cmd/brokerd holiday 2026-11-27 "Day after Thanksgiving" 13:00
 ## Tests
 
 ```bash
-make test       # needs Docker, the tests start Postgres with testcontainers
+make test       # needs Docker, the tests start Postgres and Kafka with testcontainers
 make test-short # unit tests only
 make lint
 make bench
