@@ -6,7 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/maphash"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -35,21 +37,32 @@ type Config struct {
 	// fraction: 0.02 holds 2% more than the order costs at the ask.
 	// Default 0.02.
 	Collar decimal.Decimal
-	// MaxQuoteAge is how old a quote can be for a market order to fill at
-	// it. 0 means any age, for replays of old data. Default 1m.
+	// MaxQuoteAge is how old a quote can be for an order to fill at it.
+	// Default 1m.
 	MaxQuoteAge time.Duration
-	Now         func() time.Time
-	Logger      *slog.Logger
+	// Workers is how many goroutines match resting orders. Default 4.
+	Workers int
+	// ExpiryInterval is how often day orders are checked for expiry.
+	// Default 1s.
+	ExpiryInterval time.Duration
+	Now            func() time.Time
+	Logger         *slog.Logger
 }
 
-// Engine places, fills and cancels orders. Its methods are safe to call
-// from any goroutine.
+// Engine places, fills, cancels and expires orders. Its methods are safe to
+// call from any goroutine; resting orders only fill while Run runs.
 type Engine struct {
-	cfg Config
+	cfg     Config
+	seed    maphash.Seed
+	workers []*worker
+
+	mu    sync.Mutex
+	books map[ledger.Asset]*book // resting limit orders by symbol
 }
 
-// New returns an Engine.
-func New(cfg Config) (*Engine, error) {
+// New returns an Engine with the open orders already in the database in
+// its books, so a restart picks up where it left off.
+func New(ctx context.Context, cfg Config) (*Engine, error) {
 	if cfg.Pool == nil || cfg.Quotes == nil || cfg.Calendar == nil {
 		return nil, errors.New("engine needs a pool, quotes and a calendar")
 	}
@@ -68,13 +81,34 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.MaxQuoteAge == 0 {
 		cfg.MaxQuoteAge = time.Minute
 	}
+	if cfg.Workers < 0 || cfg.ExpiryInterval < 0 {
+		return nil, fmt.Errorf("workers and expiry interval must not be negative, got %d and %s", cfg.Workers, cfg.ExpiryInterval)
+	}
+	if cfg.Workers == 0 {
+		cfg.Workers = 4
+	}
+	if cfg.ExpiryInterval == 0 {
+		cfg.ExpiryInterval = time.Second
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)
 	}
-	return &Engine{cfg: cfg}, nil
+
+	e := &Engine{cfg: cfg, seed: maphash.MakeSeed(), books: map[ledger.Asset]*book{}}
+	for range cfg.Workers {
+		e.workers = append(e.workers, &worker{dirty: map[ledger.Asset]struct{}{}, wake: make(chan struct{}, 1)})
+	}
+	open, err := orders.OpenOrders(ctx, cfg.Pool)
+	if err != nil {
+		return nil, err
+	}
+	for _, o := range open {
+		e.rest(o)
+	}
+	return e, nil
 }
 
 // rejection is why an order was turned down, as the client sees it.
@@ -84,7 +118,8 @@ func (r rejection) Error() string { return string(r) }
 
 // Place records an order and, if the account can cover it, accepts it by
 // placing a hold: cash for a buy, shares for a sell. A market order then
-// fills at once at the ask or the bid. An order the account can't cover,
+// fills at once at the ask or the bid, and so does a limit order the quote
+// already crosses; other limit orders rest until a quote crosses them. An order the account can't cover,
 // or a market order with no usable quote, is stored as rejected, with the
 // reason. Placing an order with a client order ID that was used before
 // returns the first order.
@@ -116,6 +151,9 @@ func (e *Engine) Place(ctx context.Context, r orders.Request) (orders.Order, err
 	})
 	if err != nil {
 		return orders.Order{}, err
+	}
+	if placed.Open() {
+		e.rest(placed)
 	}
 	return placed, nil
 }
@@ -176,12 +214,30 @@ func (e *Engine) tryAccept(ctx context.Context, tx pgx.Tx, o orders.Order) (orde
 	if o, err = orders.Accept(ctx, tx, o.ID, hold.ID, expires); err != nil {
 		return orders.Order{}, err
 	}
-	if o.Type == orders.Market {
+	if o.Type == orders.Limit {
+		price = e.marketable(o)
+	}
+	if price.IsPositive() {
 		if o, err = e.fill(ctx, tx, o, price); err != nil {
 			return orders.Order{}, rejectionFor(err, o)
 		}
 	}
 	return o, nil
+}
+
+// marketable returns the price a limit order would fill at right now, or
+// zero if it would rest.
+func (e *Engine) marketable(o orders.Order) decimal.Decimal {
+	q, err := e.quote(o.Symbol)
+	if err != nil {
+		return decimal.Zero
+	}
+	b := book{}
+	b.add(o)
+	if due := b.crossing(q); len(due) > 0 {
+		return due[0].price
+	}
+	return decimal.Zero
 }
 
 func (e *Engine) quote(symbol ledger.Asset) (marketdata.Quote, error) {
@@ -299,6 +355,7 @@ func (e *Engine) Cancel(ctx context.Context, accountID, orderID string) (orders.
 	if err != nil {
 		return orders.Order{}, err
 	}
+	e.unbook(canceled.Symbol, canceled.ID)
 	return canceled, nil
 }
 

@@ -64,7 +64,7 @@ func newHarness(t *testing.T, cfg engine.Config) *harness {
 	noErr(t, err)
 	cfg.Pool, cfg.Quotes, cfg.Calendar = h.pool, h.quotes, calendar.New()
 	cfg.Now = h.clock
-	h.engine, err = engine.New(cfg)
+	h.engine, err = engine.New(h.ctx, cfg)
 	noErr(t, err)
 	return h
 }
