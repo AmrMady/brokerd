@@ -32,7 +32,13 @@ type testLedger struct {
 
 func newTestLedger(t *testing.T) testLedger {
 	t.Helper()
-	l := testLedger{ctx: t.Context(), pool: pgtest.NewPool(t)}
+	return newTestLedgerOf(t, pgtest.NewPool(t))
+}
+
+// newTestLedgerOf sets up a ledger in pool's database.
+func newTestLedgerOf(t *testing.T, pool *pgxpool.Pool) testLedger {
+	t.Helper()
+	l := testLedger{ctx: t.Context(), pool: pool}
 	for _, symbol := range []ledger.Asset{"AAPL", "MSFT"} {
 		if err := l.addAsset(symbol, 9); err != nil {
 			t.Fatalf("add asset %s: %v", symbol, err)
@@ -221,6 +227,30 @@ func wantErr(t *testing.T, err, want error) {
 	t.Helper()
 	if !errors.Is(err, want) {
 		t.Fatalf("got error %v, want %v", err, want)
+	}
+}
+
+// peakConns samples how many of the pool's connections are in use, until
+// the returned function is called, which returns the most it saw.
+func peakConns(pool *pgxpool.Pool) func() int32 {
+	done, peak := make(chan struct{}), make(chan int32)
+	go func() {
+		var most int32
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				peak <- most
+				return
+			case <-ticker.C:
+				most = max(most, pool.Stat().AcquiredConns())
+			}
+		}
+	}()
+	return func() int32 {
+		close(done)
+		return <-peak
 	}
 }
 

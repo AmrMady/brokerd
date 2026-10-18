@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -30,6 +31,7 @@ type server struct {
 	adminURL  *url.URL
 	template  string
 	container *tcpostgres.PostgresContainer
+	maxConns  int // the server's max_connections
 }
 
 var (
@@ -43,8 +45,27 @@ var (
 )
 
 // NewURL returns the URL of a new database that is dropped when the test
-// ends. It skips the test in -short mode.
+// ends. Pools made from it have up to 8 connections. It skips the test in
+// -short mode.
 func NewURL(tb testing.TB) string {
+	tb.Helper()
+	return newURL(tb, 8)
+}
+
+// NewPoolSize is NewPool with up to conns connections, for tests of what
+// many transactions do at once, but no more than a quarter of what the
+// server allows, so other tests running meanwhile still get theirs.
+func NewPoolSize(tb testing.TB, conns int) *pgxpool.Pool {
+	tb.Helper()
+	pool, err := postgres.NewPool(context.Background(), newURL(tb, conns))
+	if err != nil {
+		tb.Fatalf("connect to test database: %v", err)
+	}
+	tb.Cleanup(pool.Close)
+	return pool
+}
+
+func newURL(tb testing.TB, conns int) string {
 	tb.Helper()
 	if testing.Short() {
 		tb.Skip("skipping database test in -short mode")
@@ -62,7 +83,7 @@ func NewURL(tb testing.TB) string {
 		tb.Fatalf("create test database: %v", err)
 	}
 	tb.Cleanup(func() { srv.dropDatabase(tb, name) })
-	return srv.urlFor(name)
+	return srv.urlFor(name, min(conns, srv.maxConns/4))
 }
 
 // NewPool returns a pool for a new database that is dropped when the test
@@ -125,13 +146,16 @@ func start(ctx context.Context) (server, error) {
 	}
 	s.adminURL = u
 
+	if s.maxConns, err = s.maxConnections(ctx); err != nil {
+		return s, err
+	}
 	if err = s.exec(ctx, "DROP DATABASE IF EXISTS "+s.template+" WITH (FORCE)"); err != nil {
 		return s, err
 	}
 	if err = s.exec(ctx, "CREATE DATABASE "+s.template); err != nil {
 		return s, err
 	}
-	pool, err := postgres.NewPool(ctx, s.urlFor(s.template))
+	pool, err := postgres.NewPool(ctx, s.urlFor(s.template, 8))
 	if err != nil {
 		return s, err
 	}
@@ -151,13 +175,24 @@ func (s server) exec(ctx context.Context, sql string) (err error) {
 	return nil
 }
 
-func (s server) urlFor(name string) string {
+func (s server) maxConnections(ctx context.Context) (n int, err error) {
+	conn, err := pgx.Connect(ctx, s.adminURL.String())
+	if err != nil {
+		return 0, fmt.Errorf("connect to test server: %w", err)
+	}
+	defer func() { err = errors.Join(err, conn.Close(ctx)) }()
+	err = conn.QueryRow(ctx, `SELECT current_setting('max_connections')::int`).Scan(&n)
+	return n, err
+}
+
+// urlFor returns the URL of database name, for pools of up to conns
+// connections. Every package's tests can share one server when it's given
+// in EnvURL, so pools are small unless a test asks otherwise.
+func (s server) urlFor(name string, conns int) string {
 	u := *s.adminURL
 	u.Path = "/" + name
 	q := u.Query()
-	// Every package's tests share one server when it's given in EnvURL, as
-	// in CI, so each pool stays small to fit Postgres's 100 connections.
-	q.Set("pool_max_conns", "8")
+	q.Set("pool_max_conns", strconv.Itoa(max(conns, 1)))
 	u.RawQuery = q.Encode()
 	return u.String()
 }

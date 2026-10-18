@@ -10,13 +10,15 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/AmrMady/brokerd/internal/ledger"
+	"github.com/AmrMady/brokerd/internal/postgres/pgtest"
 )
 
 // 1,000 goroutines place holds on one account and then settle or release them.
 // The final balances and versions must match the successful operations exactly.
+// It has a pool big enough for the goroutines to contend in Postgres rather
+// than wait for a connection, and doesn't run in parallel with other tests.
 func TestConcurrentHoldsAndFills(t *testing.T) {
-	t.Parallel()
-	l := newTestLedger(t)
+	l := newTestLedgerOf(t, pgtest.NewPoolSize(t, 200))
 	owner := l.openAccount(t)
 	l.mustDeposit(t, "d0", owner, "50000")
 
@@ -39,6 +41,7 @@ func TestConcurrentHoldsAndFills(t *testing.T) {
 		shareWrites += shareW
 	}
 
+	peak := peakConns(l.pool)
 	runConcurrently(1000, func(i int) {
 		holdKey, fillID := fmt.Sprintf("hold-%d", i), fmt.Sprintf("fill-%d", i)
 		price := decimal.New(int64(90+i%10), 0)
@@ -108,6 +111,9 @@ func TestConcurrentHoldsAndFills(t *testing.T) {
 		}
 	})
 
+	if n, most := peak(), l.pool.Config().MaxConns; n < most/2 {
+		t.Errorf("at most %d of %d connections in use at once, want the goroutines contending in Postgres, not for connections", n, most)
+	}
 	t.Logf("%d fills settled, %d holds rejected for insufficient funds", fills.Load(), rejected.Load())
 	if fills.Load() == 0 {
 		t.Fatal("no fill succeeded")
@@ -126,5 +132,67 @@ func TestConcurrentHoldsAndFills(t *testing.T) {
 	if cash.Balance.IsNegative() || shares.Balance.IsNegative() {
 		t.Errorf("negative balance: cash %s, shares %s", cash.Balance, shares.Balance)
 	}
+	l.requireReconciled(t)
+}
+
+// Fifty customers trade at once, and every fill posts to the same system
+// accounts: clearing, fees and the fee payables. Writes lock those rows in
+// one order, so none of the transactions deadlock, and the books balance.
+func TestManyCustomersTradeAtOnce(t *testing.T) {
+	l := newTestLedgerOf(t, pgtest.NewPoolSize(t, 100))
+	noErr(t, l.addFeeRate(ledger.SECFee, "2026-01-01", "0.0000278", ""))
+	noErr(t, l.addFeeRate(ledger.TAF, "2026-01-01", "0.000166", "8.30"))
+	const customers, rounds = 50, 5
+	ids := make([]string, customers)
+	for i := range ids {
+		ids[i] = l.openAccount(t)
+		l.mustDeposit(t, "d", ids[i], "10000")
+	}
+
+	peak := peakConns(l.pool)
+	runConcurrently(customers, func(i int) {
+		trade := func(key string, side ledger.Side, symbol ledger.Asset, price string) error {
+			asset, amount := ledger.USD, "101" // a share at 100, and the commission
+			if side == ledger.Sell {
+				asset, amount = symbol, "1"
+			}
+			h, err := l.placeHold("hold-"+key, ids[i], asset, amount)
+			if err != nil {
+				return err
+			}
+			_, err = l.settle(ledger.Fill{
+				ID: key, HoldID: h.ID, AccountID: ids[i], Symbol: symbol, Side: side,
+				Quantity: dec("1"), Price: dec(price), Fee: dec("1"),
+			})
+			return err
+		}
+		for r := range rounds {
+			for _, symbol := range []ledger.Asset{"AAPL", "MSFT"} {
+				key := fmt.Sprintf("%s-%d", symbol, r)
+				if err := trade("buy-"+key, ledger.Buy, symbol, "100"); err != nil {
+					t.Errorf("customer %d: buy %s: %v", i, key, err)
+					return
+				}
+				if err := trade("sell-"+key, ledger.Sell, symbol, "101"); err != nil {
+					t.Errorf("customer %d: sell %s: %v", i, key, err)
+					return
+				}
+			}
+		}
+	})
+	if n, most := peak(), min(customers, l.pool.Config().MaxConns); n < most/2 {
+		t.Errorf("at most %d transactions ran at once, want at least %d", n, most/2)
+	}
+
+	// Each round trip costs a customer the two commissions, less the dollar
+	// gained, plus a cent each of SEC fee and TAF on the sale.
+	for _, id := range ids {
+		l.wantBalance(t, id, ledger.USD, "9989.8", "0")
+		l.wantBalance(t, id, "AAPL", "0", "0")
+		l.wantBalance(t, id, "MSFT", "0", "0")
+	}
+	l.wantBalance(t, ledger.Fees, ledger.USD, "1000", "0")
+	l.wantBalance(t, ledger.SECFeePayable, ledger.USD, "5", "0")
+	l.wantBalance(t, ledger.TAFPayable, ledger.USD, "5", "0")
 	l.requireReconciled(t)
 }
