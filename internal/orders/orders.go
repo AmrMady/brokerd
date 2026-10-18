@@ -378,13 +378,18 @@ func OpenOrders(ctx context.Context, q ledger.Querier) ([]Order, error) {
 	return list, nil
 }
 
-// Expiring returns up to limit accepted orders that expire at or before now.
-func Expiring(ctx context.Context, q ledger.Querier, now time.Time, limit int) ([]Order, error) {
+// Expiring returns up to limit accepted orders that expire at or before
+// now, in expiry order, from just after the order after; pass a zero Order
+// for the first page.
+func Expiring(ctx context.Context, q ledger.Querier, now time.Time, after Order, limit int) ([]Order, error) {
+	if after.ID == "" {
+		after.ID = "00000000-0000-0000-0000-000000000000"
+	}
 	rows, err := q.Query(ctx, `
 		SELECT `+columns+` FROM orders
-		WHERE status = 'accepted' AND expires_at <= $1
+		WHERE status = 'accepted' AND expires_at <= $1 AND (expires_at, id) > ($2, $3::uuid)
 		ORDER BY expires_at, id
-		LIMIT $2`, now, limit)
+		LIMIT $4`, now, after.ExpiresAt, after.ID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("load expiring orders: %w", err)
 	}

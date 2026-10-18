@@ -389,11 +389,16 @@ func TestExpiring(t *testing.T) {
 		now  time.Time
 		want int
 	}{{closeAt.Add(-time.Second), 0}, {closeAt, 1}, {closeAt.Add(time.Hour), 1}} {
-		list, listErr := orders.Expiring(s.ctx, s.pool, tt.now, 10)
+		list, listErr := orders.Expiring(s.ctx, s.pool, tt.now, orders.Order{}, 10)
 		noErr(t, listErr)
 		if len(list) != tt.want {
 			t.Errorf("Expiring(%s) = %d orders, want %d", tt.now, len(list), tt.want)
 		}
+	}
+	accepted, err := orders.Get(s.ctx, s.pool, day.ID)
+	noErr(t, err)
+	if list, listErr := orders.Expiring(s.ctx, s.pool, closeAt, accepted, 10); listErr != nil || len(list) != 0 {
+		t.Errorf("Expiring after the last one = %d orders, %v; want none", len(list), listErr)
 	}
 }
 

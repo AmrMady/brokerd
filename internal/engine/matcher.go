@@ -158,22 +158,30 @@ func (e *Engine) expireLoop(ctx context.Context) {
 	}
 }
 
-// expireDue expires the day orders whose session has closed.
+// expireDue expires the day orders whose session has closed. An order that
+// fails to expire is logged, counted and skipped, so it can't hold up the
+// ones after it; the next pass tries it again.
 func (e *Engine) expireDue(ctx context.Context) error {
+	now := e.cfg.Now()
+	var after orders.Order
 	for {
-		now := e.cfg.Now()
-		due, err := orders.Expiring(ctx, e.cfg.Pool, now, expiryBatch)
+		due, err := orders.Expiring(ctx, e.cfg.Pool, now, after, expiryBatch)
 		if err != nil {
 			return err
 		}
 		for _, o := range due {
 			if err = e.expire(ctx, o.ID, now); err != nil {
-				return err
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				e.expiryErrors.Add(1)
+				e.cfg.Logger.Error("expire order", "order", o.ID, "error", err)
 			}
 		}
 		if len(due) < expiryBatch {
 			return nil
 		}
+		after = due[len(due)-1]
 	}
 }
 

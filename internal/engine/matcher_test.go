@@ -195,6 +195,34 @@ func TestDayOrdersDontFillAfterTheirClose(t *testing.T) {
 	h.requireReconciled(t)
 }
 
+// An order that fails to expire doesn't keep the orders behind it from
+// expiring.
+func TestExpirySkipsOrdersThatFail(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, engine.Config{ExpiryInterval: 10 * time.Millisecond})
+	alice := h.account(t, "1000")
+	day := limit(alice, ledger.Buy, "1", "10")
+	day.TimeInForce = orders.Day
+	h.setNow(friday.AddDate(0, 0, -1))
+	stuck := h.place(t, day) // expires first, on Thursday
+	h.setNow(friday)
+	var rest []string
+	for range 3 {
+		rest = append(rest, h.place(t, day).ID)
+	}
+	h.failChange(t, stuck.ID, orders.Expired, false)
+
+	h.setNow(time.Date(2026, 10, 16, 20, 0, 0, 0, time.UTC)) // Friday's close
+	run(t, h.engine)
+	for _, id := range rest {
+		h.waitFor(t, alice, id, orders.Expired)
+	}
+	wantStatus(t, h.waitFor(t, alice, stuck.ID, orders.Accepted), orders.Accepted, "")
+	if n := h.engine.Stats().ExpiryErrors; n == 0 {
+		t.Errorf("%d expiry errors counted, want some", n)
+	}
+}
+
 // placeResting places n resting buys of one share at 99.
 func (h *harness) placeResting(t *testing.T, account string, n int) []string {
 	t.Helper()

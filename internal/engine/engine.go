@@ -9,6 +9,7 @@ import (
 	"hash/maphash"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -64,6 +65,18 @@ type Engine struct {
 
 	mu    sync.Mutex
 	books map[ledger.Asset]*book // resting limit orders by symbol
+
+	expiryErrors atomic.Uint64
+}
+
+// Stats are the engine's counts.
+type Stats struct {
+	ExpiryErrors uint64 // orders that failed to expire, each time they failed
+}
+
+// Stats returns the engine's counts.
+func (e *Engine) Stats() Stats {
+	return Stats{ExpiryErrors: e.expiryErrors.Load()}
 }
 
 // New returns an Engine with the open orders already in the database in

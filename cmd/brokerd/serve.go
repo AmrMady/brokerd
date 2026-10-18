@@ -156,6 +156,7 @@ func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.L
 		if eng, err = startEngine(ctx, cfg, pool, quotes, logger, reg); err != nil {
 			return err
 		}
+		reg.Engine(eng)
 		if err = api.MaintainIdempotency(ctx, pool, time.Now()); err != nil {
 			return err
 		}

@@ -156,6 +156,30 @@ func (h *harness) requireReconciled(t *testing.T) {
 	}
 }
 
+// failChange makes Postgres refuse to move order id to status, at the
+// change or, with atCommit, when its transaction commits.
+func (h *harness) failChange(t *testing.T, id string, status orders.Status, atCommit bool) {
+	t.Helper()
+	when := "BEFORE UPDATE ON orders"
+	if atCommit {
+		when = "AFTER UPDATE ON orders DEFERRABLE INITIALLY DEFERRED"
+	}
+	trigger := "TRIGGER"
+	if atCommit {
+		trigger = "CONSTRAINT TRIGGER"
+	}
+	_, err := h.pool.Exec(h.ctx, fmt.Sprintf(`
+		CREATE FUNCTION fail_change() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			RAISE EXCEPTION 'test: order %%s can''t be %%s', NEW.id, NEW.status;
+		END;
+		$$;
+		CREATE %s fail_change %s FOR EACH ROW
+			WHEN (NEW.id = '%s' AND NEW.status = '%s') EXECUTE FUNCTION fail_change();`,
+		trigger, when, id, status))
+	noErr(t, err)
+}
+
 func noErr(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {

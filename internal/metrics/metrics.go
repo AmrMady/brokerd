@@ -10,6 +10,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/AmrMady/brokerd/internal/engine"
 	"github.com/AmrMady/brokerd/internal/marketdata"
 	"github.com/AmrMady/brokerd/internal/stream"
 )
@@ -92,6 +93,14 @@ func (r *Registry) MarketData(seq *marketdata.Sequencer, bars map[string]*market
 			}, func() float64 { return float64(agg.Stats().Late) }),
 		)
 	}
+}
+
+// Engine exports the engine's counts.
+func (r *Registry) Engine(e *engine.Engine) {
+	r.reg.MustRegister(
+		prometheus.NewCounterFunc(prometheus.CounterOpts{Name: "brokerd_engine_expiry_errors_total", Help: "Times an order failed to expire."},
+			func() float64 { return float64(e.Stats().ExpiryErrors) }),
+	)
 }
 
 // Stream exports the hub's counts.

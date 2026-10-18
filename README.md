@@ -128,8 +128,8 @@ checks against the server's routes.
   and one structured log line. `/healthz` says the process is up; `/readyz`
   checks the database and says 503 once shutdown starts. `/metrics` has
   Prometheus metrics: events per second, sequence gaps, hub drops and
-  disconnects, place-to-fill and ledger post latency, and request latency
-  by route.
+  disconnects, place-to-fill and ledger post latency, orders that failed
+  to expire, and request latency by route.
 - On SIGTERM, brokerd reports not ready, stops taking requests and finishes
   the ones in flight while quotes still flow, then stops the feed and the
   engine, closes the WebSocket clients, and closes the database pool last.

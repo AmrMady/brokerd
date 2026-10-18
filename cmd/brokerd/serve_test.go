@@ -296,7 +296,7 @@ func TestServeWithAPI(t *testing.T) {
 	if closeErr := resp.Body.Close(); err != nil || closeErr != nil {
 		t.Fatal(err, closeErr)
 	}
-	for _, name := range []string{"brokerd_marketdata_events_total", "brokerd_ledger_post_seconds_count 1", `route="POST /v1/accounts"`} {
+	for _, name := range []string{"brokerd_marketdata_events_total", "brokerd_ledger_post_seconds_count 1", "brokerd_engine_expiry_errors_total 0", `route="POST /v1/accounts"`} {
 		if !strings.Contains(string(scraped), name) {
 			t.Errorf("metrics have no %s", name)
 		}
