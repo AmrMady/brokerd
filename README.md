@@ -467,6 +467,8 @@ go run ./cmd/loadtest -url http://localhost:8080 -workers 50 -duration 30s
 
 ## Design decisions
 
+There's a short record of the main ones in [docs/adr](docs/adr).
+
 - Double-entry, because a balance that can't be explained isn't a balance.
   Every change is an entry whose lines sum to zero per asset, so `brokerd
   reconcile` can rebuild every balance from the journal and prove nothing was
