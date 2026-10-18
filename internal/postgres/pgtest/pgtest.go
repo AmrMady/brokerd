@@ -155,7 +155,9 @@ func (s server) urlFor(name string) string {
 	u := *s.adminURL
 	u.Path = "/" + name
 	q := u.Query()
-	q.Set("pool_max_conns", "16")
+	// Every package's tests share one server when it's given in EnvURL, as
+	// in CI, so each pool stays small to fit Postgres's 100 connections.
+	q.Set("pool_max_conns", "8")
 	u.RawQuery = q.Encode()
 	return u.String()
 }
