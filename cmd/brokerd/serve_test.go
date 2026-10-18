@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +18,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/AmrMady/brokerd/internal/postgres/pgtest"
 )
 
 type served struct {
@@ -64,7 +68,7 @@ func (s *served) stopped(t *testing.T) map[string]any {
 		if err := json.Unmarshal([]byte(line), &m); err != nil {
 			t.Fatal(err)
 		}
-		if m["msg"] == "market data stopped" {
+		if m["msg"] == "stopped" {
 			return m
 		}
 	}
@@ -250,4 +254,82 @@ func TestParseServe(t *testing.T) {
 	if _, err = parseServe([]string{"-h"}, io.Discard); !errors.Is(err, flag.ErrHelp) {
 		t.Errorf("-h returned %v, want %v", err, flag.ErrHelp)
 	}
+}
+
+// With a database, serve runs the API next to the stream.
+func TestServeWithAPI(t *testing.T) {
+	t.Parallel()
+	s := startServe(t, serveConfig{databaseURL: pgtest.NewURL(t), feed: "sim", symbols: []string{"AAPL"}, rate: 1000, seed: 1})
+	base := "http" + strings.TrimSuffix(strings.TrimPrefix(s.url, "ws"), "/v1/stream")
+	get := func(path string, headers ...string) (int, map[string]any) {
+		return request(t, "GET", base+path, "", headers...)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for status, _ := get("/readyz"); status != http.StatusOK; status, _ = get("/readyz") {
+		if time.Now().After(deadline) {
+			t.Fatalf("not ready: %d", status)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	status, created := request(t, "POST", base+"/v1/accounts", "")
+	if status != http.StatusCreated {
+		t.Fatalf("create account: %d %v", status, created)
+	}
+	id, key := fmt.Sprint(field(created, "account", "id")), fmt.Sprint(field(created, "api_key"))
+	if status, _ = request(t, "POST", base+"/v1/accounts/"+id+"/deposits", `{"amount":"500"}`, "Authorization", "Bearer "+key); status != http.StatusCreated {
+		t.Fatalf("deposit: %d", status)
+	}
+	status, got := get("/v1/accounts/"+id, "Authorization", "Bearer "+key)
+	if status != http.StatusOK || field(got, "cash", "balance") != "500" {
+		t.Errorf("account: %d %v", status, got)
+	}
+	// The stream is mounted on the API server.
+	conn := dial(t, s.url)
+	subscribe(t, conn, `{"action":"subscribe","quotes":["AAPL"]}`)
+	readUntil(t, conn, "quote")
+	closed := drain(conn)
+
+	s.stop()
+	if err := s.wait(t); err != nil {
+		t.Errorf("serve returned %v", err)
+	}
+	<-closed
+}
+
+// field digs a value out of decoded JSON objects.
+func field(v any, path ...string) any {
+	for _, p := range path {
+		m, ok := v.(map[string]any)
+		if !ok {
+			return nil
+		}
+		v = m[p]
+	}
+	return v
+}
+
+func request(t *testing.T, method, url, body string, headers ...string) (int, map[string]any) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), method, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i+1 < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, nil
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			t.Error(closeErr)
+		}
+	}()
+	var out map[string]any
+	if err = json.NewDecoder(resp.Body).Decode(&out); err != nil && !errors.Is(err, io.EOF) {
+		t.Fatal(err)
+	}
+	return resp.StatusCode, out
 }

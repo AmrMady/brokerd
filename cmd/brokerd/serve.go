@@ -13,22 +13,31 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/AmrMady/brokerd/internal/api"
+	"github.com/AmrMady/brokerd/internal/calendar"
+	"github.com/AmrMady/brokerd/internal/engine"
+	"github.com/AmrMady/brokerd/internal/ledger"
 	"github.com/AmrMady/brokerd/internal/marketdata"
+	"github.com/AmrMady/brokerd/internal/postgres"
 	"github.com/AmrMady/brokerd/internal/stream"
 )
 
 const shutdownTimeout = 10 * time.Second
 
 type serveConfig struct {
-	addr     string
-	feed     string
-	symbols  []string
-	rate     int
-	seed     uint64
-	file     string
-	speed    float64
-	upstream string
-	grace    time.Duration
+	databaseURL string // optional; the engine and API need it
+	addr        string
+	feed        string
+	symbols     []string
+	rate        int
+	seed        uint64
+	file        string
+	speed       float64
+	upstream    string
+	grace       time.Duration
 }
 
 func parseServe(args []string, output io.Writer) (serveConfig, error) {
@@ -90,77 +99,154 @@ func (cfg serveConfig) newFeed(logger *slog.Logger) (marketdata.Feed, func() err
 	}
 }
 
-// serve runs the market data pipeline and streams it from ln until ctx is
+// serve runs the market data pipeline and serves it from ln until ctx is
 // done or the feed ends:
 //
-//	feed -> sequencer -> 1s and 1m bars -> hub
+//	feed -> sequencer -> quote cache -> engine
+//	                  -> 1s and 1m bars -> hub
 //	                  -> hub
+//
+// The engine and the API only run with a database; without one, serve only
+// streams market data, which is all a relay needs.
 func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.Logger) (err error) {
+	defer func() {
+		if closeErr := ln.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+			err = errors.Join(err, closeErr)
+		}
+	}()
 	feed, release, err := cfg.newFeed(logger)
 	if err != nil {
-		return errors.Join(err, ln.Close())
+		return err
 	}
 	defer func() { err = errors.Join(err, release()) }()
 
 	hub, err := stream.NewHub(stream.Config{Logger: logger})
 	if err != nil {
-		return errors.Join(err, ln.Close())
+		return err
 	}
 	seconds, err := marketdata.NewAggregator(time.Second, cfg.grace, hub)
 	if err != nil {
-		return errors.Join(err, ln.Close())
+		return err
 	}
 	minutes, err := marketdata.NewAggregator(time.Minute, cfg.grace, hub)
 	if err != nil {
-		return errors.Join(err, ln.Close())
+		return err
 	}
-	sequencer := marketdata.NewSequencer(marketdata.Handlers{seconds, minutes, hub})
+	quotes := &marketdata.QuoteCache{}
+	handlers := marketdata.Handlers{quotes}
 
-	mux := http.NewServeMux()
-	mux.Handle("GET /v1/stream", hub)
+	var (
+		handler http.Handler
+		apiSrv  *api.Server
+		eng     *engine.Engine
+		pool    *pgxpool.Pool
+	)
+	if cfg.databaseURL == "" {
+		mux := http.NewServeMux()
+		mux.Handle("GET /v1/stream", hub)
+		handler = mux
+	} else {
+		if pool, err = postgres.NewPool(ctx, cfg.databaseURL); err != nil {
+			return err
+		}
+		defer pool.Close()
+		if eng, err = startEngine(ctx, cfg, pool, quotes, logger); err != nil {
+			return err
+		}
+		handlers = append(handlers, eng) // after the cache, so it reads the newest quote
+		apiSrv = api.New(api.Config{Pool: pool, Engine: eng, Logger: logger})
+		apiSrv.Handle("GET /v1/stream", hub)
+		handler = apiSrv
+	}
+	sequencer := marketdata.NewSequencer(append(handlers, seconds, minutes, hub))
+
 	srv := &http.Server{
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ln) }()
 
+	engineCtx, stopEngine := context.WithCancel(context.Background())
+	defer stopEngine()
+	engineDone := make(chan error, 1)
+	if eng != nil {
+		go func() { engineDone <- eng.Run(engineCtx) }()
+	} else {
+		close(engineDone)
+	}
+
 	feedCtx, stopFeed := context.WithCancel(ctx)
 	defer stopFeed()
 	fed := make(chan error, 1)
 	go func() { fed <- feed.Run(feedCtx, sequencer) }()
-	logger.Info("serving market data", "addr", ln.Addr().String(), "feed", cfg.feed, "symbols", cfg.symbols)
+	logger.Info("serving", "addr", ln.Addr().String(), "feed", cfg.feed, "symbols", cfg.symbols, "api", eng != nil)
 
-	// The aggregators belong to the feed's goroutine until it has
-	// returned, so they're only flushed after that.
+	feedEnded := false
 	select {
 	case err = <-fed:
+		feedEnded = true
 		if err == nil {
+			// The aggregators belong to the feed's goroutine until it has
+			// returned, so they're only flushed now.
 			seconds.Flush()
 			minutes.Flush()
 			logger.Info("feed ended")
 		}
 	case err = <-served:
-		stopFeed()
-		<-fed
 	case <-ctx.Done():
-		stopFeed()
-		if err = <-fed; errors.Is(err, context.Canceled) {
-			err = nil
-		}
 	}
 
-	// The HTTP server doesn't wait for WebSocket connections, which the
-	// hub closes and waits for.
+	// Stop taking requests and finish the ones in flight while quotes still
+	// flow, then stop the feed and the engine, then the WebSocket clients,
+	// which the HTTP server doesn't wait for. The pool closes last.
 	sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	err = errors.Join(err, srv.Shutdown(sctx), hub.Close(sctx))
+	if apiSrv != nil {
+		apiSrv.Drain()
+	}
+	err = errors.Join(err, srv.Shutdown(sctx))
+	stopFeed()
+	if !feedEnded {
+		if feedErr := <-fed; !errors.Is(feedErr, context.Canceled) {
+			err = errors.Join(err, feedErr)
+		}
+	}
+	stopEngine()
+	if engineErr, ok := <-engineDone; ok && !errors.Is(engineErr, context.Canceled) {
+		err = errors.Join(err, engineErr)
+	}
+	err = errors.Join(err, hub.Close(sctx))
 
 	seq, s, m, h := sequencer.Stats(), seconds.Stats(), minutes.Stats(), hub.Stats()
-	logger.Info("market data stopped",
+	logger.Info("stopped",
 		"gaps", seq.Gaps, "missed", seq.Missed, "stale", seq.Stale,
 		"bars", s.Bars+m.Bars, "late_1s", s.Late, "late_1m", m.Late,
 		"dropped", h.Dropped, "disconnected", h.Disconnected)
 	return err
+}
+
+// startEngine makes sure the feed's symbols can be traded and starts the
+// engine with the market calendar.
+func startEngine(ctx context.Context, cfg serveConfig, pool *pgxpool.Pool, quotes engine.Quotes, logger *slog.Logger) (*engine.Engine, error) {
+	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		for _, symbol := range cfg.symbols {
+			if _, err := ledger.AssetScale(ctx, tx, ledger.Asset(symbol)); err == nil {
+				continue
+			}
+			if err := ledger.AddAsset(ctx, tx, ledger.Asset(symbol), 9); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("add symbols: %w", err)
+	}
+	cal, err := calendar.Load(ctx, pool)
+	if err != nil {
+		return nil, err
+	}
+	return engine.New(ctx, engine.Config{Pool: pool, Quotes: quotes, Calendar: cal, Logger: logger})
 }

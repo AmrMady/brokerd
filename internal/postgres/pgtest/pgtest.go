@@ -42,9 +42,9 @@ var (
 	dbSeq    atomic.Int64
 )
 
-// NewPool returns a pool for a new database that is dropped when the test
+// NewURL returns the URL of a new database that is dropped when the test
 // ends. It skips the test in -short mode.
-func NewPool(tb testing.TB) *pgxpool.Pool {
+func NewURL(tb testing.TB) string {
 	tb.Helper()
 	if testing.Short() {
 		tb.Skip("skipping database test in -short mode")
@@ -54,23 +54,26 @@ func NewPool(tb testing.TB) *pgxpool.Pool {
 		tb.Fatalf("start test database server: %v", errStart)
 	}
 
-	ctx := context.Background()
 	name := fmt.Sprintf("brokerd_test_%d_%d", os.Getpid(), dbSeq.Add(1))
 	createMu.Lock()
-	err := srv.exec(ctx, fmt.Sprintf("CREATE DATABASE %s TEMPLATE %s", name, srv.template))
+	err := srv.exec(context.Background(), fmt.Sprintf("CREATE DATABASE %s TEMPLATE %s", name, srv.template))
 	createMu.Unlock()
 	if err != nil {
 		tb.Fatalf("create test database: %v", err)
 	}
+	tb.Cleanup(func() { srv.dropDatabase(tb, name) })
+	return srv.urlFor(name)
+}
 
-	pool, err := postgres.NewPool(ctx, srv.urlFor(name))
+// NewPool returns a pool for a new database that is dropped when the test
+// ends. It skips the test in -short mode.
+func NewPool(tb testing.TB) *pgxpool.Pool {
+	tb.Helper()
+	pool, err := postgres.NewPool(context.Background(), NewURL(tb))
 	if err != nil {
 		tb.Fatalf("connect to test database: %v", err)
 	}
-	tb.Cleanup(func() {
-		pool.Close()
-		srv.dropDatabase(tb, name)
-	})
+	tb.Cleanup(pool.Close)
 	return pool
 }
 

@@ -2,8 +2,9 @@
 //
 // Usage:
 //
-//	brokerd serve [flags]       stream market data over WebSocket; see
-//	                            brokerd serve -h
+//	brokerd serve [flags]       serve the API and market data; see
+//	                            brokerd serve -h. Without DATABASE_URL it
+//	                            only streams market data.
 //	brokerd migrate             apply database migrations
 //	brokerd reconcile           check the ledger, exit 1 on any mismatch
 //	brokerd settle [YYYY-MM-DD] settle trades due on or before the date
@@ -17,7 +18,7 @@
 //	                            add a market holiday, or an early close at
 //	                            HH:MM New York time
 //
-// The commands other than serve need DATABASE_URL.
+// The other commands need DATABASE_URL.
 package main
 
 import (
@@ -83,6 +84,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		if err != nil {
 			return err
 		}
+		cfg.databaseURL = os.Getenv("DATABASE_URL")
 		ln, err := net.Listen("tcp", cfg.addr)
 		if err != nil {
 			return err
