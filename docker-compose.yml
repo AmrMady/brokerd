@@ -15,5 +15,31 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  # Migrates the database, and for this demo sets the regulatory fees to
+  # zero so sells work. Load the published SEC and FINRA rates for anything
+  # else.
+  setup:
+    build: .
+    environment:
+      DATABASE_URL: postgres://brokerd:brokerd@postgres:5432/brokerd?sslmode=disable
+    entrypoint: ["sh", "-c"]
+    command:
+      - brokerd migrate && brokerd fee-rate sec 2000-01-01 0 && brokerd fee-rate taf 2000-01-01 0 0
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  brokerd:
+    build: .
+    command: ["serve", "-addr", ":8080"]
+    environment:
+      DATABASE_URL: postgres://brokerd:brokerd@postgres:5432/brokerd?sslmode=disable
+    ports:
+      - "${BROKERD_PORT:-8080}:8080"
+    stop_grace_period: 15s
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+
 volumes:
   pgdata:

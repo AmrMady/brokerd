@@ -1,7 +1,7 @@
 DATABASE_URL ?= postgres://brokerd:brokerd@localhost:5432/brokerd?sslmode=disable
 export DATABASE_URL
 
-.PHONY: build test test-short bench lint serve db-up db-down migrate reconcile settle
+.PHONY: build test test-short bench lint run serve db-up db-down migrate reconcile settle
 
 build:
 	go build ./...
@@ -17,6 +17,9 @@ bench:
 
 lint:
 	golangci-lint run ./...
+
+run:
+	docker compose up --build
 
 serve:
 	go run ./cmd/brokerd serve
