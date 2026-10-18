@@ -20,11 +20,12 @@ func TestRandomOperationsKeepLedgerConsistent(t *testing.T) {
 			t.Parallel()
 			l := newTestLedger(t)
 			s := &simulation{
-				t:      t,
-				l:      l,
-				rng:    rand.New(rand.NewPCG(seed, 0)),
-				owners: []string{l.openAccount(t), l.openAccount(t), l.openAccount(t)},
-				model:  map[modelKey]*modelBalance{},
+				t:          t,
+				l:          l,
+				rng:        rand.New(rand.NewPCG(seed, 0)),
+				owners:     []string{l.openAccount(t), l.openAccount(t), l.openAccount(t)},
+				model:      map[modelKey]*modelBalance{},
+				restricted: map[string]bool{},
 			}
 			for s.step = range 200 {
 				s.randomOperation()
@@ -60,6 +61,10 @@ type simulation struct {
 	model  map[modelKey]*modelBalance
 	holds  []ledger.Hold // active holds
 	done   []doneRequest
+	// Sales that cost more than the account could pay leave a deficit and
+	// restrict the account.
+	deficits   decimal.Decimal
+	restricted map[string]bool
 }
 
 // doneRequest is a successful request, kept to test replays and key reuse.
@@ -170,6 +175,8 @@ func (s *simulation) withdraw() {
 	cash := s.account(owner, ledger.USD)
 	var want error
 	switch left := cash.available().Sub(amount); {
+	case s.restricted[owner]:
+		want = ledger.ErrAccountRestricted
 	case left.IsNegative():
 		want = ledger.ErrInsufficientFunds
 	case left.LessThan(cash.unsettled):
@@ -205,7 +212,10 @@ func (s *simulation) hold(owner string, asset ledger.Asset, amount decimal.Decim
 	op := fmt.Sprintf("hold %s %s for %s", amount, asset, owner)
 	acct := s.account(owner, asset)
 	var want error
-	if acct.available().LessThan(amount) {
+	switch {
+	case s.restricted[owner]:
+		want = ledger.ErrAccountRestricted
+	case acct.available().LessThan(amount):
 		want = ledger.ErrInsufficientFunds
 	}
 	h, err := s.l.placeHold(key, owner, asset, amount.String())
@@ -268,6 +278,9 @@ func (s *simulation) settle() {
 	} else {
 		f.Side, f.Symbol = ledger.Sell, h.Asset
 		f.Fee = s.cents(0, 200)
+		if s.rng.IntN(4) == 0 {
+			f.Fee = s.cents(0, 10_000_000) // can be more than the sale and the cash
+		}
 		f.Quantity = s.portion(h.Remaining)
 		if exceed {
 			f.Quantity = h.Remaining.Add(decimal.New(1, -9))
@@ -288,8 +301,6 @@ func (s *simulation) settle() {
 		want = ledger.ErrInvalid
 	case need.GreaterThan(h.Remaining):
 		want = ledger.ErrHoldExceeded
-	case f.Side == ledger.Sell && cash.available().Add(notional).Sub(f.Fee).IsNegative():
-		want = ledger.ErrInsufficientFunds
 	}
 
 	e, err := s.l.settle(f)
@@ -303,8 +314,15 @@ func (s *simulation) settle() {
 	} else {
 		shares.balance = shares.balance.Sub(f.Quantity)
 		shares.held = shares.held.Sub(need)
-		cash.balance = cash.balance.Add(notional).Sub(f.Fee)
-		if proceeds := notional.Sub(f.Fee); proceeds.IsPositive() {
+		proceeds := notional.Sub(f.Fee)
+		if shortfall := proceeds.Neg().Sub(cash.available()); shortfall.IsPositive() {
+			// The trade is booked anyway: the account pays what it has.
+			proceeds = cash.available().Neg()
+			s.deficits = s.deficits.Sub(shortfall)
+			s.restricted[f.AccountID] = true
+		}
+		cash.balance = cash.balance.Add(proceeds)
+		if proceeds.IsPositive() {
 			cash.unsettled = cash.unsettled.Add(proceeds)
 		}
 	}
@@ -369,7 +387,17 @@ func (s *simulation) settleDue() {
 
 func (s *simulation) compareBalances() {
 	s.t.Helper()
+	if got := s.l.balance(s.t, ledger.Deficits, ledger.USD); !got.Balance.Equal(s.deficits) {
+		s.t.Errorf("deficits: %s, model says %s", got.Balance, s.deficits)
+	}
 	for _, owner := range s.owners {
+		a, err := ledger.AccountByID(s.l.ctx, s.l.pool, owner)
+		if err != nil {
+			s.t.Fatal(err)
+		}
+		if restricted := a.Status == ledger.AccountRestricted; restricted != s.restricted[owner] {
+			s.t.Errorf("%s is %s, model says restricted %t", owner, a.Status, s.restricted[owner])
+		}
 		for _, asset := range append([]ledger.Asset{ledger.USD}, simSymbols...) {
 			got := s.l.balance(s.t, owner, asset)
 			want := s.account(owner, asset)

@@ -184,6 +184,21 @@ func (l testLedger) wantBalance(t *testing.T, owner string, asset ledger.Asset, 
 	}
 }
 
+// wantRestricted checks that the account was restricted once, for reason.
+func (l testLedger) wantRestricted(t *testing.T, account, reason string) {
+	t.Helper()
+	a, err := ledger.AccountByID(l.ctx, l.pool, account)
+	noErr(t, err)
+	if a.Status != ledger.AccountRestricted {
+		t.Errorf("account is %s, want restricted", a.Status)
+	}
+	changes, err := ledger.AccountStatusChanges(l.ctx, l.pool, account)
+	noErr(t, err)
+	if len(changes) != 1 || changes[0].Reason != reason {
+		t.Errorf("status history = %+v, want one change for %q", changes, reason)
+	}
+}
+
 func (l testLedger) requireReconciled(t *testing.T) {
 	t.Helper()
 	report, err := ledger.Reconcile(l.ctx, l.pool)

@@ -146,15 +146,15 @@ accounts sit on one side; the system accounts `external_bank`, `clearing`,
 |-------------------|-----------------------------------------------------------------------------------------|
 | Deposit X         | external_bank -X, customer +X                                                           |
 | Withdraw X        | customer -X, external_bank +X                                                           |
-| Deposit returned  | external_bank +X, customer -a, deficits -(X-a)                                          |
+| Deposit returned  | external_bank +X, customer -X                                                           |
 | Buy q @ p, fee f  | customer USD -(n+f), clearing USD +n, fees +f, clearing SYM -q, customer SYM +q         |
 | Sell q @ p, fee f | customer SYM -q, clearing SYM +q, clearing USD -n, customer USD +(n-f-s-t), fees +f,    |
 |                   | sec_fee_payable +s, taf_payable +t                                                      |
 | Reversal          | every line of the reversed entry, negated                                               |
+| Deficit d         | deficits -d, customer USD +d                                                            |
 
 `n` is `q * p` rounded half-to-even to the cent. `s` and `t` are the SEC fee
-and FINRA's trading activity fee (TAF). `a` is what the customer still has
-available when a deposit comes back.
+and FINRA's trading activity fee (TAF).
 
 Some notes on how it works:
 
@@ -178,8 +178,15 @@ Some notes on how it works:
   confirms them, and a pending withdrawal holds its cash. Bank events
   (completed, canceled, returned) are compare-and-sets on the transfer's
   status, so a repeated event changes nothing and a cancel and a completion
-  can't both win. If a returned deposit was already spent, the `deficits`
-  account covers the difference and the account is restricted.
+  can't both win.
+- Some entries have to be booked even when the customer can't pay: a
+  returned deposit that was already spent, a sale whose fees are more than
+  it brings in, or the reversal of a sale whose proceeds were spent. The
+  customer pays what cash they have, a deficit entry from the `deficits`
+  account covers the rest, and the account is restricted. The deficit is
+  its own entry, so a fill still matches its trade and a reversal still
+  mirrors what it reverses. Covering a shortfall takes the account's row
+  exclusively, so the cash it reads can't change before the entry posts.
 - Transfer requests, holds and fills take an idempotency key, scoped to
   the account. Retrying a request returns the original result; reusing a key
   for a different request is an error.

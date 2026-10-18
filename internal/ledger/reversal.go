@@ -17,6 +17,11 @@ import (
 // it hasn't settled yet, and undoes what it did to tax lots; a buy can't be
 // reversed once any of its shares were sold. Reversing an entry twice returns
 // the first reversal.
+//
+// Reversing a sale takes its proceeds back, which the customer may have
+// spent. It takes what cash is left; the deficits account covers the rest
+// with a deficit entry, so the reversal still mirrors the fill, and the
+// account is restricted.
 func ReverseEntry(ctx context.Context, tx pgx.Tx, entryID int64, reason string) (Entry, error) {
 	if err := validateReason(reason); err != nil {
 		return Entry{}, err
@@ -28,15 +33,25 @@ func ReverseEntry(ctx context.Context, tx pgx.Tx, entryID int64, reason string) 
 	if original.Kind != KindTradeFill {
 		return Entry{}, fmt.Errorf("%w: %s entries can't be reversed", ErrInvalid, original.Kind)
 	}
-	for _, account := range customerAccounts(original.Lines) {
-		if _, err = lockAccount(ctx, tx, account); err != nil {
-			return Entry{}, err
-		}
-	}
-
 	lines := make([]Line, len(original.Lines))
 	for i, l := range original.Lines {
 		lines[i] = Line{AccountID: l.AccountID, Asset: l.Asset, Amount: l.Amount.Neg()}
+	}
+	// An account the reversal takes cash from may need a shortfall covered,
+	// which needs it to itself.
+	var paying []Account
+	for _, id := range customerAccounts(original.Lines) {
+		if !slices.ContainsFunc(lines, func(l Line) bool { return l.AccountID == id && l.Asset == USD && l.Amount.IsNegative() }) {
+			if _, err = lockAccount(ctx, tx, id); err != nil {
+				return Entry{}, err
+			}
+			continue
+		}
+		a, lockErr := lockAccountForUpdate(ctx, tx, id)
+		if lockErr != nil {
+			return Entry{}, lockErr
+		}
+		paying = append(paying, a)
 	}
 	pending, err := prepareEntry(ctx, tx, posting{
 		kind:     KindReversal,
@@ -88,6 +103,11 @@ func ReverseEntry(ctx context.Context, tx pgx.Tx, entryID int64, reason string) 
 	}
 	if err = reverseLots(ctx, tx, entryID); err != nil {
 		return Entry{}, err
+	}
+	for _, a := range paying {
+		if err = coverShortfall(ctx, tx, lines, a, "trade reversed: "+reason); err != nil {
+			return Entry{}, err
+		}
 	}
 	return pending.finish(ctx, tx, extra)
 }

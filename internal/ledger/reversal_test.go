@@ -63,6 +63,35 @@ func TestReverseFill(t *testing.T) {
 	l.requireReconciled(t)
 }
 
+// Reversing a sale whose proceeds were already spent takes what cash is
+// left; the deficits account covers the rest, and the account is
+// restricted.
+func TestReverseSaleAlreadySpent(t *testing.T) {
+	t.Parallel()
+	l := newTestLedger(t)
+	alice := l.openAccount(t)
+	l.mustDeposit(t, "d1", alice, "100")
+	l.buy(t, "f1", alice, "1", "100")
+	h := l.mustHold(t, "h1", alice, "AAPL", "1")
+	sale, err := l.settle(ledger.Fill{
+		ID: "f2", HoldID: h.ID, AccountID: alice, Symbol: "AAPL", Side: ledger.Sell,
+		Quantity: dec("1"), Price: dec("120"), Fee: dec("0"),
+	})
+	noErr(t, err)
+	l.buy(t, "f3", alice, "1", "90") // with the unsettled proceeds
+
+	_, err = l.reverse(sale.ID, "busted by the exchange")
+	noErr(t, err)
+	l.wantBalance(t, alice, ledger.USD, "0", "0")
+	l.wantBalance(t, alice, "AAPL", "2", "0")
+	l.wantBalance(t, ledger.Deficits, ledger.USD, "-90", "0")
+	if b := l.balance(t, alice, ledger.USD); !b.Unsettled.IsZero() {
+		t.Errorf("unsettled %s, want none once the sale is reversed", b.Unsettled)
+	}
+	l.wantRestricted(t, alice, "trade reversed: busted by the exchange")
+	l.requireReconciled(t)
+}
+
 func TestReverseRules(t *testing.T) {
 	t.Parallel()
 	l := newTestLedger(t)

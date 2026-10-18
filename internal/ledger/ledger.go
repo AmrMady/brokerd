@@ -52,6 +52,7 @@ const (
 	KindWithdrawalReturn Kind = "withdrawal_return"
 	KindTradeFill        Kind = "trade_fill"
 	KindReversal         Kind = "reversal"
+	KindDeficit          Kind = "deficit"
 )
 
 // Line adds Amount of Asset to an account. Negative amounts take it away.

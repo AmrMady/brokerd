@@ -158,6 +158,11 @@ func (f Fill) metadata() map[string]string {
 // right away but stay unsettled, and can't be withdrawn, until SettleDue
 // settles them. Sells also pay the SEC fee and TAF at the rates in effect on
 // the trade date, and fail with ErrNoFeeRate if there is none.
+//
+// The trade has already happened, so it's booked even when the account
+// can't pay for it: a sale whose fees are more than it brings in takes what
+// cash the account has, the deficits account covers the rest, and the
+// account is restricted.
 func SettleFill(ctx context.Context, tx pgx.Tx, f Fill) (Entry, error) {
 	if err := f.validate(); err != nil {
 		return Entry{}, err
@@ -165,16 +170,24 @@ func SettleFill(ctx context.Context, tx pgx.Tx, f Fill) (Entry, error) {
 	if _, err := loadHold(ctx, tx, f.HoldID); err != nil {
 		return Entry{}, err
 	}
-	status, err := lockAccount(ctx, tx, f.AccountID)
+	fees, err := feesFor(ctx, tx, f)
+	if err != nil {
+		return Entry{}, err
+	}
+	// Covering a shortfall reads what cash the account has, which needs the
+	// account to itself.
+	owes := f.Side == Sell && f.netProceeds(fees).IsNegative()
+	var account Account
+	if owes {
+		account, err = lockAccountForUpdate(ctx, tx, f.AccountID)
+	} else {
+		account.Status, err = lockAccount(ctx, tx, f.AccountID)
+	}
 	if err != nil {
 		return Entry{}, err
 	}
 	cashRef := accountRef{account: f.AccountID, asset: USD}
 	cash, err := resolveAccounts(ctx, tx, []accountRef{cashRef})
-	if err != nil {
-		return Entry{}, err
-	}
-	fees, err := feesFor(ctx, tx, f)
 	if err != nil {
 		return Entry{}, err
 	}
@@ -198,8 +211,13 @@ func SettleFill(ctx context.Context, tx pgx.Tx, f Fill) (Entry, error) {
 	if err != nil || pending == nil {
 		return replayed, err
 	}
-	if err = requireStatus(f.AccountID, status, AccountActive, AccountRestricted); err != nil {
+	if err = requireStatus(f.AccountID, account.Status, AccountActive, AccountRestricted); err != nil {
 		return Entry{}, err
+	}
+	if owes {
+		if err = coverShortfall(ctx, tx, p.lines, account, "fees more than the sale: "+f.ID); err != nil {
+			return Entry{}, err
+		}
 	}
 
 	ref, need := f.holdNeeds()

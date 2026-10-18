@@ -232,7 +232,8 @@ func CancelTransfer(ctx context.Context, tx pgx.Tx, id int64) (Transfer, error) 
 // ReturnTransfer reverses a completed transfer the bank sent back, such as an
 // ACH return. A returned withdrawal is credited back. A returned deposit is
 // taken back out of the account; if the customer has already spent some of
-// it, the deficits account covers the rest and the account is restricted.
+// it, the deficits account covers the rest with a deficit entry, and the
+// account is restricted.
 // Returning a returned transfer is a no-op.
 func ReturnTransfer(ctx context.Context, tx pgx.Tx, id int64, reason string) (Transfer, error) {
 	if err := validateReason(reason); err != nil {
@@ -253,24 +254,11 @@ func ReturnTransfer(ctx context.Context, tx pgx.Tx, id int64, reason string) (Tr
 		{AccountID: ExternalBank, Asset: USD, Amount: current.Amount.Neg()},
 		{AccountID: current.AccountID, Asset: USD, Amount: current.Amount},
 	}}
-	var shortfall decimal.Decimal
 	if current.Direction == DirectionDeposit {
-		var available decimal.Decimal
-		err = tx.QueryRow(ctx, `
-			SELECT balance - held FROM ledger_accounts WHERE account_id = $1 AND asset = 'USD'`,
-			current.AccountID).Scan(&available)
-		if err != nil {
-			return Transfer{}, fmt.Errorf("load available cash of %s: %w", current.AccountID, err)
-		}
-		taken := decimal.Min(current.Amount, available)
-		shortfall = current.Amount.Sub(taken)
 		p.kind = KindDepositReturn
-		p.lines = []Line{{AccountID: ExternalBank, Asset: USD, Amount: current.Amount}}
-		if taken.IsPositive() {
-			p.lines = append(p.lines, Line{AccountID: current.AccountID, Asset: USD, Amount: taken.Neg()})
-		}
-		if shortfall.IsPositive() {
-			p.lines = append(p.lines, Line{AccountID: Deficits, Asset: USD, Amount: shortfall.Neg()})
+		p.lines = []Line{
+			{AccountID: ExternalBank, Asset: USD, Amount: current.Amount},
+			{AccountID: current.AccountID, Asset: USD, Amount: current.Amount.Neg()},
 		}
 	}
 	pending, err := prepareEntry(ctx, tx, p)
@@ -282,16 +270,14 @@ func ReturnTransfer(ctx context.Context, tx pgx.Tx, id int64, reason string) (Tr
 	if err != nil || !changed {
 		return t.Transfer, err
 	}
+	if err = coverShortfall(ctx, tx, p.lines, account, "deposit returned: "+reason); err != nil {
+		return Transfer{}, err
+	}
 	if err = pending.insert(ctx, tx); err != nil {
 		return Transfer{}, err
 	}
 	if _, err = pending.finish(ctx, tx, nil); err != nil {
 		return Transfer{}, err
-	}
-	if shortfall.IsPositive() && account.Status == AccountActive {
-		if _, err = changeStatus(ctx, tx, account, AccountRestricted, "deposit returned: "+reason); err != nil {
-			return Transfer{}, err
-		}
 	}
 	return t.Transfer, nil
 }
