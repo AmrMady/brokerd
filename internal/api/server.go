@@ -18,15 +18,23 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AmrMady/brokerd/internal/engine"
+	"github.com/AmrMady/brokerd/internal/marketdata"
 	"github.com/AmrMady/brokerd/internal/portfolio"
 )
 
-// Config configures a Server.
+// Config configures a Server. Without a pool and an engine, it only serves
+// market data.
 type Config struct {
 	Pool   *pgxpool.Pool
 	Engine *engine.Engine
 	Quotes portfolio.Quotes
+	Bars   Bars
 	Logger *slog.Logger
+}
+
+// Bars gives the most recent bars of a symbol.
+type Bars interface {
+	Bars(symbol string, interval time.Duration, limit int) []marketdata.Bar
 }
 
 // Server serves the API. Other handlers, like the market data stream, can be
@@ -48,6 +56,15 @@ func New(cfg Config) *Server {
 	s := &Server{cfg: cfg, mux: http.NewServeMux()}
 	s.mux.HandleFunc("GET /healthz", s.healthz)
 	s.mux.HandleFunc("GET /readyz", s.readyz)
+	// Anything else gets the usual JSON error rather than the mux's text.
+	s.route("/", func(http.ResponseWriter, *http.Request) error { return errNotFound })
+	if cfg.Quotes != nil && cfg.Bars != nil {
+		s.route("GET /v1/quotes/{symbol}", s.quote)
+		s.route("GET /v1/bars/{symbol}", s.bars)
+	}
+	if cfg.Pool == nil || cfg.Engine == nil {
+		return s
+	}
 	s.route("POST /v1/accounts", s.createAccount)
 	s.route("GET /v1/accounts/{account}", s.authorized(s.getAccount))
 	s.route("POST /v1/accounts/{account}/deposits", s.authorized(s.deposit))
@@ -155,6 +172,10 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	if s.draining.Load() {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "draining"})
+		return
+	}
+	if s.cfg.Pool == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)

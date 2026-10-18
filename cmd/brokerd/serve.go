@@ -25,7 +25,10 @@ import (
 	"github.com/AmrMady/brokerd/internal/stream"
 )
 
-const shutdownTimeout = 10 * time.Second
+const (
+	shutdownTimeout = 10 * time.Second
+	barsKept        = 1000 // of each symbol and timeframe, for the API
+)
 
 type serveConfig struct {
 	databaseURL string // optional; the engine and API need it
@@ -124,28 +127,22 @@ func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.L
 	if err != nil {
 		return err
 	}
-	seconds, err := marketdata.NewAggregator(time.Second, cfg.grace, hub)
+	bars := marketdata.NewBarStore(barsKept)
+	seconds, err := marketdata.NewAggregator(time.Second, cfg.grace, marketdata.BarHandlers{hub, bars})
 	if err != nil {
 		return err
 	}
-	minutes, err := marketdata.NewAggregator(time.Minute, cfg.grace, hub)
+	minutes, err := marketdata.NewAggregator(time.Minute, cfg.grace, marketdata.BarHandlers{hub, bars})
 	if err != nil {
 		return err
 	}
 	quotes := &marketdata.QuoteCache{}
 	handlers := marketdata.Handlers{quotes}
 
-	var (
-		handler http.Handler
-		apiSrv  *api.Server
-		eng     *engine.Engine
-		pool    *pgxpool.Pool
-	)
-	if cfg.databaseURL == "" {
-		mux := http.NewServeMux()
-		mux.Handle("GET /v1/stream", hub)
-		handler = mux
-	} else {
+	apiCfg := api.Config{Quotes: quotes, Bars: bars, Logger: logger}
+	var eng *engine.Engine
+	if cfg.databaseURL != "" {
+		var pool *pgxpool.Pool
 		if pool, err = postgres.NewPool(ctx, cfg.databaseURL); err != nil {
 			return err
 		}
@@ -154,14 +151,14 @@ func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.L
 			return err
 		}
 		handlers = append(handlers, eng) // after the cache, so it reads the newest quote
-		apiSrv = api.New(api.Config{Pool: pool, Engine: eng, Quotes: quotes, Logger: logger})
-		apiSrv.Handle("GET /v1/stream", hub)
-		handler = apiSrv
+		apiCfg.Pool, apiCfg.Engine = pool, eng
 	}
+	apiSrv := api.New(apiCfg)
+	apiSrv.Handle("GET /v1/stream", hub)
 	sequencer := marketdata.NewSequencer(append(handlers, seconds, minutes, hub))
 
 	srv := &http.Server{
-		Handler:           handler,
+		Handler:           apiSrv,
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
@@ -203,9 +200,7 @@ func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.L
 	// which the HTTP server doesn't wait for. The pool closes last.
 	sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	if apiSrv != nil {
-		apiSrv.Drain()
-	}
+	apiSrv.Drain()
 	err = errors.Join(err, srv.Shutdown(sctx))
 	stopFeed()
 	if !feedEnded {
