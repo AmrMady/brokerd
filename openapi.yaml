@@ -412,14 +412,19 @@ components:
 
     Position:
       type: object
-      description: The cost fields are null when part of the cost is unknown, the market fields when there's no bid.
+      description: |
+        The cost fields are null when part of the cost is unknown, the market
+        fields when there's no quote with both a bid and an ask.
       properties:
         symbol: { type: string }
         qty: { $ref: "#/components/schemas/Decimal" }
         qty_available: { $ref: "#/components/schemas/Decimal" }
         cost_basis: { oneOf: [{ $ref: "#/components/schemas/Decimal" }, { type: "null" }] }
         avg_entry_price: { oneOf: [{ $ref: "#/components/schemas/Decimal" }, { type: "null" }] }
-        current_price: { oneOf: [{ $ref: "#/components/schemas/Decimal" }, { type: "null" }] }
+        current_price:
+          description: The mid of the latest quote.
+          oneOf: [{ $ref: "#/components/schemas/Decimal" }, { type: "null" }]
+        price_at: { type: [string, "null"], format: date-time, description: The time of that quote. }
         market_value: { oneOf: [{ $ref: "#/components/schemas/Decimal" }, { type: "null" }] }
         unrealized_pl: { oneOf: [{ $ref: "#/components/schemas/Decimal" }, { type: "null" }] }
 

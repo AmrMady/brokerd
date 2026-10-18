@@ -5,6 +5,7 @@ package portfolio
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,14 +22,15 @@ type Quotes interface {
 
 // Position is the shares of one symbol an account holds. The cost fields
 // are null when part of the position's cost is unknown, and the market
-// fields when there's no bid to value it at.
+// fields when there's no quote with both a bid and an ask to value it at.
 type Position struct {
 	Symbol      ledger.Asset
 	Quantity    decimal.Decimal
 	Available   decimal.Decimal // not held by open sell orders
 	CostBasis   decimal.NullDecimal
 	AverageCost decimal.NullDecimal // per share, to four decimal places
-	Price       decimal.NullDecimal // the latest bid
+	Price       decimal.NullDecimal // the mid of the latest quote
+	PriceAt     time.Time           // the quote's time; zero without a price
 	MarketValue decimal.NullDecimal
 	Unrealized  decimal.NullDecimal // gain or loss: market value less cost basis
 }
@@ -82,13 +84,16 @@ func position(ctx context.Context, tx pgx.Tx, b ledger.Balance) (Position, error
 	return p, nil
 }
 
+// value marks p at the mid of the latest quote: the bid would undervalue
+// every position by half the spread.
 func value(p Position, quotes Quotes) Position {
 	q, ok := quotes.Quote(string(p.Symbol))
-	if !ok || !q.Bid.IsPositive() {
+	if !ok || !q.Bid.IsPositive() || !q.Ask.IsPositive() {
 		return p
 	}
-	p.Price = decimal.NewNullDecimal(q.Bid)
-	worth := p.Quantity.Mul(q.Bid).RoundBank(2)
+	mid := q.Bid.Add(q.Ask).Div(decimal.NewFromInt(2))
+	p.Price, p.PriceAt = decimal.NewNullDecimal(mid), q.Timestamp
+	worth := p.Quantity.Mul(mid).RoundBank(2)
 	p.MarketValue = decimal.NewNullDecimal(worth)
 	if p.CostBasis.Valid {
 		p.Unrealized = decimal.NewNullDecimal(worth.Sub(p.CostBasis.Decimal))

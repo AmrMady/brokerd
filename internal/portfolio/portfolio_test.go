@@ -150,12 +150,16 @@ func TestPositions(t *testing.T) {
 	if len(p) != 1 {
 		t.Fatalf("positions %v, want AAPL", p)
 	}
-	want(t, p[0], "20", "20", "2101", "105.05", "120", "2400", "299")
+	// Marked at the mid of the latest quote, and as of its time.
+	want(t, p[0], "20", "20", "2101", "105.05", "120.05", "2401", "300")
+	if !p[0].PriceAt.Equal(now) {
+		t.Errorf("price at %s, want the quote's time", p[0].PriceAt)
+	}
 
 	// Selling takes the older lot first, so half of its 1001 goes.
 	h.order(t, "AAPL", ledger.Sell, "5", "")
 	h.order(t, "AAPL", ledger.Sell, "5", "200") // rests, holding 5 shares
-	want(t, h.positions(t)[0], "15", "10", "1600.5", "106.7", "120", "1800", "199.5")
+	want(t, h.positions(t)[0], "15", "10", "1600.5", "106.7", "120.05", "1800.75", "200.25")
 }
 
 func TestPositionsWithoutAQuote(t *testing.T) {
@@ -164,7 +168,11 @@ func TestPositionsWithoutAQuote(t *testing.T) {
 	h.quote("MSFT", "400", "400.10")
 	h.order(t, "MSFT", ledger.Buy, "3", "")
 	h.quotes.HandleQuote(marketdata.Quote{Symbol: "MSFT", Ask: dec("400.10"), Timestamp: now}) // the bid is gone
-	want(t, h.positions(t)[0], "3", "3", "1200.3", "400.1", "null", "null", "null")
+	p := h.positions(t)[0]
+	want(t, p, "3", "3", "1200.3", "400.1", "null", "null", "null")
+	if !p.PriceAt.IsZero() {
+		t.Errorf("price at %s with no price", p.PriceAt)
+	}
 }
 
 func TestPositionsOfUnknownCost(t *testing.T) {
@@ -174,7 +182,7 @@ func TestPositionsOfUnknownCost(t *testing.T) {
 	h.order(t, "AAPL", ledger.Buy, "10", "")
 	_, err := h.pool.Exec(h.ctx, `UPDATE tax_lots SET cost = NULL, remaining_cost = NULL`)
 	noErr(t, err)
-	want(t, h.positions(t)[0], "10", "10", "null", "null", "100", "1000", "null")
+	want(t, h.positions(t)[0], "10", "10", "null", "null", "100.05", "1000.5", "null")
 }
 
 func TestPositionsOfUnknownAccount(t *testing.T) {

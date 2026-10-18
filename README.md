@@ -278,7 +278,7 @@ was canceled, or be both.
   loses nothing.
 - Positions come from the ledger: quantity, what isn't held by open sells,
   cost basis and average cost from the FIFO tax lots, and market value and
-  unrealized gain at the latest bid.
+  unrealized gain at the mid of the latest quote, with that quote's time.
 
 ## Market data
 

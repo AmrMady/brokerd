@@ -141,6 +141,7 @@ type positionJSON struct {
 	CostBasis   decimal.NullDecimal `json:"cost_basis"`
 	AverageCost decimal.NullDecimal `json:"avg_entry_price"`
 	Price       decimal.NullDecimal `json:"current_price"`
+	PriceAt     *time.Time          `json:"price_at"`
 	MarketValue decimal.NullDecimal `json:"market_value"`
 	Unrealized  decimal.NullDecimal `json:"unrealized_pl"`
 }
@@ -152,7 +153,13 @@ func (s *Server) positions(w http.ResponseWriter, r *http.Request) error {
 	}
 	out := make([]positionJSON, len(list))
 	for i, p := range list {
-		out[i] = positionJSON{string(p.Symbol), p.Quantity, p.Available, p.CostBasis, p.AverageCost, p.Price, p.MarketValue, p.Unrealized}
+		out[i] = positionJSON{
+			Symbol: string(p.Symbol), Quantity: p.Quantity, Available: p.Available, CostBasis: p.CostBasis,
+			AverageCost: p.AverageCost, Price: p.Price, MarketValue: p.MarketValue, Unrealized: p.Unrealized,
+		}
+		if !p.PriceAt.IsZero() {
+			out[i].PriceAt = &p.PriceAt
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 	return nil

@@ -119,7 +119,7 @@ func TestPositionsAndActivities(t *testing.T) {
 	pos := item(p, 0)
 	for name, want := range map[string]string{
 		"symbol": "AAPL", "qty": "10", "qty_available": "10", "cost_basis": "1001", "avg_entry_price": "100.1",
-		"current_price": "100", "market_value": "1000", "unrealized_pl": "-1",
+		"current_price": "100.05", "market_value": "1000.5", "unrealized_pl": "-0.5", "price_at": "2026-10-16T14:00:00Z",
 	} {
 		if field(pos, name) != want {
 			t.Errorf("position %s = %v, want %s", name, field(pos, name), want)
