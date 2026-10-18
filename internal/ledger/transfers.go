@@ -113,7 +113,7 @@ func requestTransfer(ctx context.Context, tx pgx.Tx, c CashTransfer, d Direction
 	}
 
 	sum := sha256.Sum256(fmt.Appendf(nil, "transfer %q %s", d, c.Amount))
-	claimed, err := claimKey(ctx, tx, c.AccountID, c.IdempotencyKey, sum[:])
+	claimed, err := claimKey(ctx, tx, opTransfer, c.AccountID, c.IdempotencyKey, sum[:])
 	if err != nil {
 		return Transfer{}, err
 	}
@@ -142,14 +142,14 @@ func requestTransfer(ctx context.Context, tx pgx.Tx, c CashTransfer, d Direction
 	if err != nil {
 		return Transfer{}, fmt.Errorf("insert transfer: %w", err)
 	}
-	if err = recordKey(ctx, tx, c.AccountID, c.IdempotencyKey, keyResult{transferID: t.ID}); err != nil {
+	if err = recordKey(ctx, tx, opTransfer, c.AccountID, c.IdempotencyKey, keyResult{transferID: t.ID}); err != nil {
 		return Transfer{}, err
 	}
 	return t.Transfer, nil
 }
 
 func replayTransfer(ctx context.Context, tx pgx.Tx, account, key string, hash []byte) (Transfer, error) {
-	used, err := usedKey(ctx, tx, account, key, hash)
+	used, err := usedKey(ctx, tx, opTransfer, account, key, hash)
 	if err != nil {
 		return Transfer{}, err
 	}

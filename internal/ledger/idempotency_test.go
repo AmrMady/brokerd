@@ -173,3 +173,27 @@ func TestRetriedHoldIsNotPlacedAgain(t *testing.T) {
 	l.wantBalance(t, alice, ledger.USD, "100", "0")
 	l.requireReconciled(t)
 }
+
+// Keys belong to their account and their operation, so a client's transfer
+// key can't block the engine's hold or fill that uses the same string.
+func TestKeysAreScopedToTheirOperation(t *testing.T) {
+	t.Parallel()
+	l := newTestLedger(t)
+	alice := l.openAccount(t)
+	l.mustDeposit(t, "fill:1", alice, "1000")
+	h := l.mustHold(t, "fill:1", alice, ledger.USD, "100")
+	_, err := l.settle(ledger.Fill{
+		ID: "fill:1", HoldID: h.ID, AccountID: alice, Symbol: "AAPL", Side: ledger.Buy,
+		Quantity: dec("1"), Price: dec("100"), Fee: dec("0"),
+	})
+	noErr(t, err)
+	l.wantBalance(t, alice, ledger.USD, "900", "0")
+	l.wantBalance(t, alice, "AAPL", "1", "0")
+
+	again, err := l.deposit("fill:1", alice, "1000")
+	noErr(t, err)
+	if again.Amount.String() != "1000" {
+		t.Errorf("replayed deposit %+v", again)
+	}
+	l.wantBalance(t, alice, ledger.USD, "900", "0")
+}

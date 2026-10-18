@@ -84,7 +84,7 @@ func PlaceHold(ctx context.Context, tx pgx.Tx, r HoldRequest) (Hold, error) {
 	}
 
 	hash := r.hash()
-	claimed, err := claimKey(ctx, tx, r.AccountID, r.IdempotencyKey, hash)
+	claimed, err := claimKey(ctx, tx, opHold, r.AccountID, r.IdempotencyKey, hash)
 	if err != nil {
 		return Hold{}, err
 	}
@@ -99,7 +99,7 @@ func PlaceHold(ctx context.Context, tx pgx.Tx, r HoldRequest) (Hold, error) {
 	if h.ID, h.CreatedAt, err = reserve(ctx, tx, ids[ref], change{held: r.Amount}); err != nil {
 		return Hold{}, err
 	}
-	if err = recordKey(ctx, tx, r.AccountID, r.IdempotencyKey, keyResult{holdID: h.ID}); err != nil {
+	if err = recordKey(ctx, tx, opHold, r.AccountID, r.IdempotencyKey, keyResult{holdID: h.ID}); err != nil {
 		return Hold{}, err
 	}
 	return h, nil
@@ -124,7 +124,7 @@ func reserve(ctx context.Context, tx pgx.Tx, ledgerAccountID int64, c change) (i
 }
 
 func replayHold(ctx context.Context, tx pgx.Tx, account, key string, hash []byte) (Hold, error) {
-	used, err := usedKey(ctx, tx, account, key, hash)
+	used, err := usedKey(ctx, tx, opHold, account, key, hash)
 	if err != nil {
 		return Hold{}, err
 	}

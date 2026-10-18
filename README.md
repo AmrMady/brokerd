@@ -188,8 +188,10 @@ Some notes on how it works:
   mirrors what it reverses. Covering a shortfall takes the account's row
   exclusively, so the cash it reads can't change before the entry posts.
 - Transfer requests, holds and fills take an idempotency key, scoped to
-  the account. Retrying a request returns the original result; reusing a key
-  for a different request is an error.
+  the account and the operation, so a client's transfer key can't collide
+  with the engine's `order:<id>` hold or `fill:<id>` fill keys. Retrying a
+  request returns the original result; reusing a key for a different
+  request is an error.
 - Fills are booked on the trade date. A sell's proceeds can be traded with
   right away but stay unsettled, and can't be withdrawn, until their
   settlement date. `brokerd settle` settles everything due; each settlement is

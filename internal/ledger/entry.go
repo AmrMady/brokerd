@@ -19,6 +19,7 @@ import (
 
 type posting struct {
 	account    string // the customer account the idempotency key belongs to
+	op         keyOp
 	key        string // empty for postings made idempotent some other way
 	kind       Kind
 	holdID     int64
@@ -130,7 +131,7 @@ func (p *pendingEntry) insert(ctx context.Context, tx pgx.Tx) error {
 	if p.key == "" {
 		return nil
 	}
-	return recordKey(ctx, tx, p.account, p.key, keyResult{entryID: p.id})
+	return recordKey(ctx, tx, p.op, p.account, p.key, keyResult{entryID: p.id})
 }
 
 // startEntry prepares p, claims its idempotency key and inserts the journal
@@ -145,13 +146,13 @@ func startEntry(ctx context.Context, tx pgx.Tx, p posting) (*pendingEntry, Entry
 	if hash == nil {
 		hash = p.hash()
 	}
-	claimed, err := claimKey(ctx, tx, p.account, p.key, hash)
+	claimed, err := claimKey(ctx, tx, p.op, p.account, p.key, hash)
 	if err != nil {
 		return nil, Entry{}, err
 	}
 	if !claimed {
 		var existing Entry
-		existing, err = replayEntry(ctx, tx, p.account, p.key, hash)
+		existing, err = replayEntry(ctx, tx, p.op, p.account, p.key, hash)
 		return nil, existing, err
 	}
 	if err = pending.insert(ctx, tx); err != nil {
@@ -160,8 +161,8 @@ func startEntry(ctx context.Context, tx pgx.Tx, p posting) (*pendingEntry, Entry
 	return pending, Entry{}, nil
 }
 
-func replayEntry(ctx context.Context, tx pgx.Tx, account, key string, hash []byte) (Entry, error) {
-	used, err := usedKey(ctx, tx, account, key, hash)
+func replayEntry(ctx context.Context, tx pgx.Tx, op keyOp, account, key string, hash []byte) (Entry, error) {
+	used, err := usedKey(ctx, tx, op, account, key, hash)
 	if err != nil {
 		return Entry{}, err
 	}

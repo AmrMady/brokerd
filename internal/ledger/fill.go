@@ -193,6 +193,7 @@ func SettleFill(ctx context.Context, tx pgx.Tx, f Fill) (Entry, error) {
 	}
 	p := posting{
 		account:  f.AccountID,
+		op:       opFill,
 		key:      f.ID,
 		kind:     KindTradeFill,
 		holdID:   f.HoldID,
