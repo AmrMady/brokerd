@@ -235,7 +235,8 @@ func TestParseServe(t *testing.T) {
 	t.Parallel()
 	cfg, err := parseServe(nil, io.Discard)
 	if err != nil || cfg.feed != "sim" || cfg.addr != ":8080" || len(cfg.symbols) != 5 || cfg.grace != time.Second ||
-		cfg.readTimeout != 30*time.Second || cfg.writeTimeout != 30*time.Second || cfg.idleTimeout != 2*time.Minute {
+		cfg.readTimeout != 30*time.Second || cfg.writeTimeout != 30*time.Second || cfg.idleTimeout != 2*time.Minute ||
+		cfg.drainDelay != 5*time.Second {
 		t.Errorf("defaults: %+v, %v", cfg, err)
 	}
 	cfg, err = parseServe([]string{"-feed", "relay", "-upstream", "ws://core:8080/v1/stream", "-symbols", "AAPL,MSFT"}, io.Discard)
@@ -295,6 +296,54 @@ func TestServeClosesIdleConnections(t *testing.T) {
 	if _, err = r.ReadByte(); !errors.Is(err, io.EOF) {
 		t.Errorf("idle connection: read returned %v, want the server to close it", err)
 	}
+}
+
+// On shutdown, serve says it isn't ready and keeps serving for the drain
+// delay before it stops, so a load balancer's readiness checks see the 503
+// and stop sending it requests first.
+func TestServeDrainsBeforeStopping(t *testing.T) {
+	t.Parallel()
+	s := startServe(t, serveConfig{feed: "sim", symbols: []string{"AAPL"}, rate: 10, seed: 1, drainDelay: time.Second})
+	base := "http" + strings.TrimSuffix(strings.TrimPrefix(s.url, "ws"), "/v1/stream")
+	deadline := time.Now().Add(10 * time.Second)
+	for status, _ := request(t, "GET", base+"/readyz", ""); status != http.StatusOK; status, _ = request(t, "GET", base+"/readyz", "") {
+		if time.Now().After(deadline) {
+			t.Fatalf("not ready: %d", status)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	s.stop()
+	began := time.Now()
+	for {
+		status, err := tryGet(t, base+"/readyz")
+		if status == http.StatusServiceUnavailable {
+			break
+		}
+		if err != nil || time.Since(began) > time.Second {
+			t.Fatalf("readyz while stopping: %d, %v; want 503", status, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := s.wait(t); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(began); took < time.Second {
+		t.Errorf("stopped %s after the signal, before the drain delay was up", took)
+	}
+}
+
+// tryGet returns the status of a GET, or the error if there's no response.
+func tryGet(t *testing.T, url string) (int, error) {
+	req, err := http.NewRequestWithContext(t.Context(), "GET", url, nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	return resp.StatusCode, resp.Body.Close()
 }
 
 // The request timeouts don't apply to the stream, which lasts as long as

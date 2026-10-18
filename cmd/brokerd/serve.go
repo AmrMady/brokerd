@@ -44,6 +44,7 @@ type serveConfig struct {
 	grace       time.Duration
 
 	readTimeout, writeTimeout, idleTimeout time.Duration
+	drainDelay                             time.Duration
 }
 
 func parseServe(args []string, output io.Writer) (serveConfig, error) {
@@ -65,6 +66,8 @@ func parseServe(args []string, output io.Writer) (serveConfig, error) {
 	fs.DurationVar(&cfg.readTimeout, "read-timeout", 30*time.Second, "how long a request can take to arrive")
 	fs.DurationVar(&cfg.writeTimeout, "write-timeout", 30*time.Second, "how long a request can take to answer")
 	fs.DurationVar(&cfg.idleTimeout, "idle-timeout", 2*time.Minute, "how long a keep-alive connection can sit idle")
+	fs.DurationVar(&cfg.drainDelay, "drain-delay", 5*time.Second,
+		"on shutdown, how long to keep serving while /readyz says 503, so load balancers stop sending requests")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
@@ -219,12 +222,16 @@ func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.L
 	case <-ctx.Done():
 	}
 
-	// Stop taking requests and finish the ones in flight while quotes still
+	// Say we aren't ready, and keep serving for the drain delay so a load
+	// balancer's readiness checks see that and stop sending requests. Then
+	// stop taking requests and finish the ones in flight while quotes still
 	// flow, then stop the feed and the engine, then the WebSocket clients,
 	// which the HTTP server doesn't wait for. The pool closes last.
+	apiSrv.Drain()
+	logger.Info("draining", "delay", cfg.drainDelay)
+	time.Sleep(cfg.drainDelay)
 	sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	apiSrv.Drain()
 	err = errors.Join(err, srv.Shutdown(sctx))
 	stopFeed()
 	if !feedEnded {

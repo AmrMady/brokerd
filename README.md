@@ -130,8 +130,10 @@ checks against the server's routes.
   Prometheus metrics: events per second, sequence gaps, hub drops and
   disconnects, place-to-fill and ledger post latency, orders that failed
   to expire, and request latency by route.
-- On SIGTERM, brokerd reports not ready, stops taking requests and finishes
-  the ones in flight while quotes still flow, then stops the feed and the
+- On SIGTERM, brokerd reports not ready and keeps serving for
+  `-drain-delay` (5s), so a load balancer's readiness checks see the 503
+  and stop sending it requests. Then it stops taking requests and finishes
+  the ones in flight while quotes still flow, stops the feed and the
   engine, closes the WebSocket clients, and closes the database pool last.
 
 ## Ledger
