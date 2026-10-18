@@ -75,3 +75,16 @@ func assetScales(ctx context.Context, q Querier, codes []string) (map[Asset]int3
 	}
 	return scales, nil
 }
+
+// AssetScale returns how many decimal places amounts of asset can have.
+func AssetScale(ctx context.Context, q Querier, asset Asset) (int32, error) {
+	scales, err := assetScales(ctx, q, []string{string(asset)})
+	if err != nil {
+		return 0, err
+	}
+	scale, ok := scales[asset]
+	if !ok {
+		return 0, fmt.Errorf("%w: unknown asset %s", ErrInvalid, asset)
+	}
+	return scale, nil
+}

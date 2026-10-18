@@ -448,3 +448,16 @@ func TestDatabaseBackstops(t *testing.T) {
 	})
 	l.requireReconciled(t)
 }
+
+func TestAssetScale(t *testing.T) {
+	t.Parallel()
+	l := newTestLedger(t)
+	for asset, want := range map[ledger.Asset]int32{ledger.USD: 2, "AAPL": 9} {
+		got, err := ledger.AssetScale(l.ctx, l.pool, asset)
+		if err != nil || got != want {
+			t.Errorf("AssetScale(%s) = %d, %v; want %d", asset, got, err, want)
+		}
+	}
+	_, err := ledger.AssetScale(l.ctx, l.pool, "NOPE")
+	wantErr(t, err, ledger.ErrInvalid)
+}
