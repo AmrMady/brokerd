@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 
 	"github.com/AmrMady/brokerd/internal/api"
 	"github.com/AmrMady/brokerd/internal/calendar"
@@ -42,6 +43,7 @@ type serveConfig struct {
 	speed       float64
 	upstream    string
 	grace       time.Duration
+	commission  decimal.Decimal
 
 	readTimeout, writeTimeout, idleTimeout time.Duration
 	drainDelay                             time.Duration
@@ -63,6 +65,14 @@ func parseServe(args []string, output io.Writer) (serveConfig, error) {
 	fs.Float64Var(&cfg.speed, "speed", 1, "replay: 1 is real time, 10 is ten times faster, 0 is as fast as possible")
 	fs.StringVar(&cfg.upstream, "upstream", "", "relay: another brokerd's stream, like ws://core:8080/v1/stream")
 	fs.DurationVar(&cfg.grace, "grace", time.Second, "how long bars wait for late trades")
+	fs.Func("commission", "USD charged on each fill, in whole cents (default 0)", func(s string) error {
+		d, err := decimal.NewFromString(s)
+		if err != nil || d.IsNegative() || !d.Equal(d.Truncate(2)) {
+			return fmt.Errorf("must be whole cents and not negative, like 0.99, got %q", s)
+		}
+		cfg.commission = d
+		return nil
+	})
 	fs.DurationVar(&cfg.readTimeout, "read-timeout", 30*time.Second, "how long a request can take to arrive")
 	fs.DurationVar(&cfg.writeTimeout, "write-timeout", 30*time.Second, "how long a request can take to answer")
 	fs.DurationVar(&cfg.idleTimeout, "idle-timeout", 2*time.Minute, "how long a keep-alive connection can sit idle")
@@ -319,7 +329,7 @@ func startEngine(ctx context.Context, cfg serveConfig, pool *pgxpool.Pool, quote
 		return nil, err
 	}
 	return engine.New(ctx, engine.Config{
-		Pool: pool, Quotes: quotes, Calendar: cal, Logger: logger,
+		Pool: pool, Quotes: quotes, Calendar: cal, Commission: cfg.commission, Logger: logger,
 		ObserveFill: reg.ObserveFill, ObservePost: reg.ObservePost,
 	})
 }

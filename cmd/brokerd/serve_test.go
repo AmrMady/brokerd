@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/shopspring/decimal"
 
 	"github.com/AmrMady/brokerd/internal/postgres/pgtest"
 )
@@ -243,7 +244,13 @@ func TestParseServe(t *testing.T) {
 	if err != nil || cfg.upstream != "ws://core:8080/v1/stream" || strings.Join(cfg.symbols, " ") != "AAPL MSFT" {
 		t.Errorf("relay: %+v, %v", cfg, err)
 	}
+	if cfg, err = parseServe([]string{"-commission", "0.99"}, io.Discard); err != nil || cfg.commission.String() != "0.99" {
+		t.Errorf("commission: %+v, %v", cfg, err)
+	}
 	for _, args := range [][]string{
+		{"-commission", "abc"},
+		{"-commission", "-1"},
+		{"-commission", "0.001"},
 		{"-feed", "kafka"},
 		{"-feed", "replay"},
 		{"-feed", "relay"},
@@ -385,7 +392,10 @@ func TestServeStreamsPastTheRequestTimeouts(t *testing.T) {
 // With a database, serve runs the API next to the stream.
 func TestServeWithAPI(t *testing.T) {
 	t.Parallel()
-	s := startServe(t, serveConfig{databaseURL: pgtest.NewURL(t), feed: "sim", symbols: []string{"AAPL"}, rate: 1000, seed: 1})
+	s := startServe(t, serveConfig{
+		databaseURL: pgtest.NewURL(t), feed: "sim", symbols: []string{"AAPL"}, rate: 1000, seed: 1,
+		commission: decimal.RequireFromString("1.5"),
+	})
 	base := "http" + strings.TrimSuffix(strings.TrimPrefix(s.url, "ws"), "/v1/stream")
 	get := func(path string, headers ...string) (int, map[string]any) {
 		return request(t, "GET", base+path, "", headers...)
@@ -409,6 +419,13 @@ func TestServeWithAPI(t *testing.T) {
 	status, got := get("/v1/accounts/"+id, "Authorization", "Bearer "+key)
 	if status != http.StatusOK || field(got, "cash", "balance") != "500" {
 		t.Errorf("account: %d %v", status, got)
+	}
+	// A limit buy far below the market rests, at any hour, with the
+	// configured commission.
+	status, order := request(t, "POST", base+"/v1/accounts/"+id+"/orders",
+		`{"symbol":"AAPL","side":"buy","type":"limit","time_in_force":"gtc","qty":"1","limit_price":"1"}`, "Authorization", "Bearer "+key)
+	if status != http.StatusCreated || field(order, "status") != "accepted" || field(order, "commission") != "1.5" {
+		t.Errorf("order: %d %v, want it accepted with a commission of 1.5", status, order)
 	}
 	req, err := http.NewRequestWithContext(t.Context(), "GET", base+"/metrics", nil)
 	if err != nil {
