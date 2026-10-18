@@ -279,6 +279,10 @@ was canceled, or be both.
 - Positions come from the ledger: quantity, what isn't held by open sells,
   cost basis and average cost from the FIFO tax lots, and market value and
   unrealized gain at the mid of the latest quote, with that quote's time.
+- It's a paper-trading model. An order fills in full at the quote, whatever
+  size the quote shows: there's no model of liquidity or market impact.
+  And customers can trade with sale proceeds before they settle, with no
+  check for free riding.
 
 ## Market data
 
@@ -391,7 +395,10 @@ Publishing a trade to 100 subscribers (1,000 clients each subscribed to 10
 of 100 symbols) takes about 21 µs, or 4.7M messages/s, on an Apple M4 Pro.
 With 50 of the clients reading only one message a millisecond, and so
 losing about 2.8 messages for every trade published, it takes about 23 µs:
-slow clients barely touch the publisher. Run it with
+slow clients barely touch the publisher. It measures what the feed's
+goroutine pays: encoding each event and queueing it for every subscriber.
+Sending the queues over WebSockets happens on each connection's own
+goroutine and isn't in the number. Run it with
 `go test -run '^$' -bench HubFanOut ./internal/stream`.
 
 ## Outbox
@@ -402,10 +409,13 @@ published if and only if what it describes happened: no dual write, no
 window where one is committed and the other isn't.
 
 - Events are published in `seq` order, and keyed by account. That order is
-  each account's commit order: every posting moves its customer's cash, and
-  holds that row locked until it commits, so a later posting of the same
-  account can't take a `seq` before an earlier one is committed. Each line
-  also carries its ledger account's version.
+  each account's commit order: every posting holds its account's row
+  locked until it commits, so a later posting of the same account can't
+  take a `seq` before an earlier one is committed. Each line also carries
+  its ledger account's version.
+- Each event type has its own topic, so the order holds per account within
+  a type, not across them: a consumer of both topics can see a fill's
+  `order_filled` before its `entry_posted`.
 - `outbox publish` runs the relay. Each relay holds a connection and tries a
   Postgres advisory lock; the one that gets it leads, and the others wait to
   take over, which they do as soon as the leader's connection drops. The
