@@ -31,6 +31,9 @@ const (
 // 409, and the same key with a different request gets 422. A 5xx response
 // isn't stored, so the request can be retried.
 //
+// Keys are scoped to the account in the path, so h must be on a route
+// under one, behind authorized.
+//
 // Claiming is a short transaction under an advisory lock on the key, so it
 // works across the table's day partitions, and no connection is held while
 // the handler runs.

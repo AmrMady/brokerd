@@ -11,8 +11,8 @@ info:
     `Authorization: Bearer bk_...`. The key is returned once, when the account
     is created.
 
-    Every request that changes something takes an `Idempotency-Key` header.
-    A retry with the same key gets the first response back, with an
+    Every request that changes an account takes an `Idempotency-Key` header,
+    scoped to that account. A retry with the same key gets the first response back, with an
     `Idempotent-Replayed: true` header; a retry while the first is still
     running gets 409, and the same key with a different request gets 422.
     Keys are kept for 24 hours.
@@ -48,9 +48,11 @@ paths:
   /v1/accounts:
     post:
       summary: Open an account. Its API key is only ever returned here.
+      description: |
+        It doesn't take an `Idempotency-Key` (422 if sent): there's no account
+        yet to scope the key to, so a stored response could be replayed to
+        anyone sending the same key.
       security: []
-      parameters:
-        - $ref: "#/components/parameters/IdempotencyKey"
       responses:
         "201":
           description: The account and its API key.

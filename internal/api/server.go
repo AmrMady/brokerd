@@ -78,9 +78,9 @@ func New(cfg Config) *Server {
 	if cfg.Pool == nil || cfg.Engine == nil {
 		return s
 	}
-	// Every request that changes something can be retried safely with an
-	// Idempotency-Key.
-	s.route("POST /v1/accounts", s.idempotent(s.createAccount))
+	// Every request that changes an account can be retried safely with an
+	// Idempotency-Key, scoped to that account.
+	s.route("POST /v1/accounts", s.createAccount)
 	s.route("GET /v1/accounts/{account}", s.authorized(s.getAccount))
 	s.route("POST /v1/accounts/{account}/deposits", s.authorized(s.idempotent(s.deposit)))
 	s.route("POST /v1/accounts/{account}/withdrawals", s.authorized(s.idempotent(s.withdraw)))

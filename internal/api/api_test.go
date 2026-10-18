@@ -194,6 +194,28 @@ func TestAccounts(t *testing.T) {
 	wantStatus(t, c.do("GET", "/v1/accounts/"+alice, "", "Authorization", bobKey), http.StatusNotFound, "not_found")
 }
 
+// Opening an account has no account to scope an Idempotency-Key to, so a
+// stored response would go to anyone sending the same key, API key and all.
+func TestOpenAccountRefusesIdempotencyKey(t *testing.T) {
+	t.Parallel()
+	c := newClient(t)
+	first := c.do("POST", "/v1/accounts", "", "Idempotency-Key", "1")
+	second := c.do("POST", "/v1/accounts", "", "Idempotency-Key", "1")
+	if key := field(second, "api_key"); key != nil && key == field(first, "api_key") {
+		t.Fatalf("a second client with the same Idempotency-Key got the first one's API key")
+	}
+	wantStatus(t, first, http.StatusUnprocessableEntity, "invalid_request")
+	wantStatus(t, second, http.StatusUnprocessableEntity, "invalid_request")
+
+	var stored int
+	if err := c.pool.QueryRow(t.Context(), `SELECT count(*) FROM idempotent_requests`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != 0 {
+		t.Errorf("%d idempotent requests stored, want none", stored)
+	}
+}
+
 func TestTransfers(t *testing.T) {
 	t.Parallel()
 	c := newClient(t)

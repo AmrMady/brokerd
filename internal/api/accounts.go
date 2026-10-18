@@ -32,7 +32,15 @@ func accountOf(a ledger.Account) accountJSON {
 
 // createAccount opens an account and returns it with its API key. The key
 // is only ever shown here.
+//
+// It refuses an Idempotency-Key. There's no account yet to scope the key
+// to, so a stored response would be replayed to anyone sending the same
+// key, and it would hold the plaintext API key.
 func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) error {
+	if r.Header.Get("Idempotency-Key") != "" {
+		return newError(http.StatusUnprocessableEntity, "invalid_request",
+			"opening an account doesn't take an Idempotency-Key; send the request without one")
+	}
 	var (
 		a   ledger.Account
 		key string

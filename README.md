@@ -104,16 +104,20 @@ checks against the server's routes.
 - Opening an account returns its API key, once. Only its SHA-256 is stored.
   Everything under `/v1/accounts/{account}` needs that account's key; a key
   for another account gets 404, so keys can't be used to find accounts.
-- Every request that changes something takes an `Idempotency-Key`. The first
-  request with a key claims it in a short transaction, under an advisory
-  lock on the key, runs, and stores its response; a retry gets the stored
-  response back with `Idempotent-Replayed: true`. A retry while the first is
-  still running gets 409, the same key with a different request gets 422,
-  and a 5xx isn't stored, so it can be retried. A claim left by a crashed
-  server can be taken over after a minute. Keys are kept for a day in a
-  table partitioned by day, so old keys go by dropping a partition. The key
-  is also passed down as the ledger's idempotency key, or as an order's
-  client order ID, so even a retry that runs again can't move money twice.
+- Every request that changes an account takes an `Idempotency-Key`, scoped
+  to that account. The first request with a key claims it in a short
+  transaction, under an advisory lock on the key, runs, and stores its
+  response; a retry gets the stored response back with
+  `Idempotent-Replayed: true`. A retry while the first is still running gets
+  409, the same key with a different request gets 422, and a 5xx isn't
+  stored, so it can be retried. A claim left by a crashed server can be
+  taken over after a minute. Keys are kept for a day in a table partitioned
+  by day, so old keys go by dropping a partition. The key is also passed
+  down as the ledger's idempotency key, or as an order's client order ID, so
+  even a retry that runs again can't move money twice.
+- Opening an account refuses an `Idempotency-Key`. There's no account yet
+  to scope it to, so the stored response, API key included, would be
+  replayed to anyone sending the same key.
 - Errors are always `{"error": {"code", "message", "request_id"}}`, with the
   status and code chosen from the domain error. Internal errors don't say
   what went wrong; the log does, under the same request ID.
