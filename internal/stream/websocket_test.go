@@ -229,3 +229,31 @@ func closeConn(t *testing.T, conn *websocket.Conn) {
 		t.Error(err)
 	}
 }
+
+// A connection sending requests faster than it's allowed gets an error for
+// each one over the limit.
+func TestRequestsAreRateLimited(t *testing.T) {
+	t.Parallel()
+	_, url := serve(t, stream.Config{})
+	conn := dial(t, url)
+	const n = 40
+	for range n {
+		send(t, conn, `{"action":"subscribe","trades":["AAPL"]}`)
+	}
+	acks, limited := 0, 0
+	for acks+limited < n {
+		for _, m := range receive(t, conn) {
+			switch {
+			case strings.Contains(m, `"type":"subscription"`):
+				acks++
+			case strings.Contains(m, "too many requests"):
+				limited++
+			default:
+				t.Fatalf("unexpected message %s", m)
+			}
+		}
+	}
+	if acks < 20 || limited == 0 {
+		t.Errorf("%d requests answered and %d refused, want a burst of 20 answered and the rest refused", acks, limited)
+	}
+}

@@ -85,13 +85,17 @@ type topic struct {
 // never blocks it: each client has its own bounded queue, and a client that
 // can't keep up loses its oldest messages and is then disconnected.
 //
-// Each event is encoded once, however many clients get it.
+// Each event is encoded once, however many clients get it. Publishing takes
+// no lock: each topic's subscribers are an immutable slice, which a
+// subscription change copies and swaps in, so clients changing their
+// subscriptions can't hold up the feed.
 type Hub struct {
 	cfg     Config
 	session string
 
-	mu            sync.RWMutex
-	topics        map[topic]map[*Client]struct{}
+	subscribers sync.Map // topic to []*Client; written under mu
+
+	mu            sync.Mutex
 	clients       map[*Client]struct{}
 	subscriptions int
 	closed        bool
@@ -117,7 +121,6 @@ func NewHub(cfg Config) (*Hub, error) {
 	return &Hub{
 		cfg:     cfg,
 		session: rand.Text(),
-		topics:  map[topic]map[*Client]struct{}{},
 		clients: map[*Client]struct{}{},
 	}, nil
 }
@@ -153,9 +156,7 @@ func (h *Hub) HandleBar(b marketdata.Bar) {
 }
 
 func publish[M any](h *Hub, t topic, m M) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	clients := h.topics[t]
+	clients := h.subscribersOf(t)
 	if len(clients) == 0 {
 		return
 	}
@@ -163,9 +164,41 @@ func publish[M any](h *Hub, t topic, m M) {
 	if !ok {
 		return
 	}
-	for c := range clients {
+	for _, c := range clients {
 		c.push(msg)
 	}
+}
+
+func (h *Hub) subscribersOf(t topic) []*Client {
+	v, ok := h.subscribers.Load(t)
+	if !ok {
+		return nil
+	}
+	clients, ok := v.([]*Client)
+	if !ok {
+		return nil
+	}
+	return clients
+}
+
+// addSubscriber is called with mu held.
+func (h *Hub) addSubscriber(t topic, c *Client) {
+	old := h.subscribersOf(t)
+	clients := make([]*Client, len(old), len(old)+1)
+	copy(clients, old)
+	h.subscribers.Store(t, append(clients, c))
+	h.subscriptions++
+}
+
+// removeSubscriber is called with mu held.
+func (h *Hub) removeSubscriber(t topic, c *Client) {
+	clients := slices.DeleteFunc(slices.Clone(h.subscribersOf(t)), func(s *Client) bool { return s == c })
+	if len(clients) == 0 {
+		h.subscribers.Delete(t)
+	} else {
+		h.subscribers.Store(t, clients)
+	}
+	h.subscriptions--
 }
 
 // Connect adds a client with no subscriptions. The caller must Close it.
@@ -212,9 +245,9 @@ func (h *Hub) Close(ctx context.Context) error {
 
 // Stats returns the counts so far.
 func (h *Hub) Stats() Stats {
-	h.mu.RLock()
+	h.mu.Lock()
 	clients, subscriptions := len(h.clients), h.subscriptions
-	h.mu.RUnlock()
+	h.mu.Unlock()
 	return Stats{
 		Clients: clients, Subscriptions: subscriptions,
 		Dropped: h.dropped.Load(), Disconnected: h.disconnected.Load(),
@@ -226,8 +259,10 @@ func (h *Hub) Stats() Stats {
 // dropping messages for MaxLag, without catching up in between, is
 // disconnected.
 type Client struct {
-	hub  *Hub
-	subs map[topic]struct{} // guarded by hub.mu
+	hub *Hub
+
+	subMu sync.Mutex // held through each subscription change
+	subs  map[topic]struct{}
 
 	mu          sync.Mutex
 	queue       [][]byte
@@ -242,78 +277,75 @@ type Client struct {
 }
 
 // Subscribe adds subscriptions, and queues a message listing all of them.
-// No event for a new subscription is queued before that message.
+// No event for a new subscription is queued before that message: it's
+// queued before the hub publishes to the client.
 func (c *Client) Subscribe(s Subscriptions) error {
 	topics, err := s.topics()
 	if err != nil {
 		return err
 	}
-	h := c.hub
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
 	if err = c.disconnected(); err != nil {
 		return err
 	}
-	added := 0
+	added := map[topic]struct{}{}
 	for _, t := range topics {
 		if _, ok := c.subs[t]; !ok {
-			added++
+			added[t] = struct{}{}
 		}
 	}
-	if total := len(c.subs) + added; total > h.cfg.MaxSubscriptions {
+	h := c.hub
+	if total := len(c.subs) + len(added); total > h.cfg.MaxSubscriptions {
 		return fmt.Errorf("%d subscriptions is more than the limit of %d", total, h.cfg.MaxSubscriptions)
 	}
-	for _, t := range topics {
-		if _, ok := c.subs[t]; ok {
-			continue
-		}
+	for t := range added {
 		c.subs[t] = struct{}{}
-		h.subscriptions++
-		if h.topics[t] == nil {
-			h.topics[t] = map[*Client]struct{}{}
-		}
-		h.topics[t][c] = struct{}{}
 	}
 	c.pushSubscriptions()
+	if len(added) == 0 {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for t := range added {
+		h.addSubscriber(t, c)
+	}
 	return nil
 }
 
 // Unsubscribe removes subscriptions, and queues a message listing the ones
-// left.
+// left. An event the hub was already publishing can still follow it.
 func (c *Client) Unsubscribe(s Subscriptions) error {
 	topics, err := s.topics()
 	if err != nil {
 		return err
 	}
-	h := c.hub
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
 	if err = c.disconnected(); err != nil {
 		return err
 	}
+	var removed []topic
 	for _, t := range topics {
-		c.unsubscribe(t)
+		if _, ok := c.subs[t]; ok {
+			delete(c.subs, t)
+			removed = append(removed, t)
+		}
+	}
+	if len(removed) > 0 {
+		h := c.hub
+		h.mu.Lock()
+		for _, t := range removed {
+			h.removeSubscriber(t, c)
+		}
+		h.mu.Unlock()
 	}
 	c.pushSubscriptions()
 	return nil
 }
 
-// unsubscribe is called with hub.mu held.
-func (c *Client) unsubscribe(t topic) {
-	if _, ok := c.subs[t]; !ok {
-		return
-	}
-	delete(c.subs, t)
-	c.hub.subscriptions--
-	if clients := c.hub.topics[t]; clients != nil {
-		delete(clients, c)
-		if len(clients) == 0 {
-			delete(c.hub.topics, t)
-		}
-	}
-}
-
-// pushSubscriptions is called with hub.mu held.
+// pushSubscriptions is called with subMu held.
 func (c *Client) pushSubscriptions() {
 	m := subscriptionMessage{Type: "subscription"}
 	for _, t := range slices.SortedFunc(maps.Keys(c.subs), func(a, b topic) int {
@@ -380,12 +412,15 @@ func (c *Client) Dropped() uint64 {
 func (c *Client) Close() {
 	c.closeOnce.Do(func() {
 		h := c.hub
+		c.subMu.Lock()
 		h.mu.Lock()
 		for t := range c.subs {
-			c.unsubscribe(t)
+			h.removeSubscriber(t, c)
 		}
+		clear(c.subs)
 		delete(h.clients, c)
 		h.mu.Unlock()
+		c.subMu.Unlock()
 		c.disconnect(ErrClientClosed)
 		h.active.Done()
 	})

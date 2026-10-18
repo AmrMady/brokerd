@@ -344,6 +344,14 @@ client can only hurt itself:
   it. Each client's queue is a fixed-size ring buffer; when it's full, the
   oldest message is dropped and counted. A writer goroutine per connection
   sends up to 256 queued messages per frame.
+- Publishing takes no lock. Each topic's subscribers are an immutable slice
+  in a `sync.Map`; a subscription change copies the slice and swaps it in,
+  under a mutex the feed never takes, and builds its confirmation outside
+  that mutex. An event already being published can still arrive just after
+  an unsubscribe's confirmation. A connection can send a burst of 20
+  requests and then 10 a second; the rest get an error. With four clients
+  each subscribing to and unsubscribing from 5,000 symbols in a loop,
+  publishing still takes microseconds.
 - A client is disconnected once it has kept dropping messages for `MaxLag`
   (5s) without emptying its queue in between, when a single write blocks
   for `MaxLag`, or when it doesn't answer a ping within `MaxLag`. A client
@@ -363,9 +371,9 @@ reset after a connection that streamed) and pings to catch a dead
 connection.
 
 Publishing a trade to 100 subscribers (1,000 clients each subscribed to 10
-of 100 symbols) takes about 29 µs, or 3.4M messages/s, on an Apple M4 Pro.
+of 100 symbols) takes about 21 µs, or 4.7M messages/s, on an Apple M4 Pro.
 With 50 of the clients reading only one message a millisecond, and so
-losing about 2.8 messages for every trade published, it takes about 31 µs:
+losing about 2.8 messages for every trade published, it takes about 23 µs:
 slow clients barely touch the publisher. Run it with
 `go test -run '^$' -bench HubFanOut ./internal/stream`.
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
@@ -45,6 +46,52 @@ func TestHubSendsSubscribedEvents(t *testing.T) {
 	wantNothing(t, other)
 	if s := h.Stats(); s.Subscriptions != 3 {
 		t.Errorf("stats = %+v, want 3 subscriptions", s)
+	}
+}
+
+// Clients spamming subscription changes don't hold up the feed.
+func TestSubscriptionSpamDoesNotDelayPublishing(t *testing.T) {
+	t.Parallel()
+	h := newHub(t, stream.Config{Buffer: 16, MaxSubscriptions: 5000})
+	reader := connect(t, h)
+	if err := reader.Subscribe(stream.Subscriptions{Quotes: []string{"AAPL"}}); err != nil {
+		t.Fatal(err)
+	}
+	var many stream.Subscriptions
+	for i := range 5000 {
+		many.Trades = append(many.Trades, fmt.Sprintf("S%d", i))
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 4 {
+		spammer := connect(t, h)
+		wg.Go(func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if spammer.Subscribe(many) != nil || spammer.Unsubscribe(many) != nil {
+					return
+				}
+			}
+		})
+	}
+	const n = 2000
+	var total, worst time.Duration
+	for i := range n {
+		began := time.Now()
+		h.HandleQuote(marketdata.Quote{Symbol: "AAPL", Seq: uint64(i + 1)})
+		took := time.Since(began)
+		total += took
+		worst = max(worst, took)
+	}
+	close(stop)
+	wg.Wait()
+	if avg := total / n; avg > time.Millisecond || worst > 50*time.Millisecond {
+		t.Errorf("publishing took %s on average and %s at worst while clients changed subscriptions", avg, worst)
 	}
 }
 

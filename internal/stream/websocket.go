@@ -20,6 +20,16 @@ const maxBatch = 256
 // unlike a message, it can't be dropped.
 const sessionHeader = "Stream-Session"
 
+// A connection can send a burst of requestBurst requests and then
+// requestRate a second, so a client can't keep the hub busy changing its
+// subscriptions.
+const (
+	requestBurst = 20
+	requestRate  = 10
+)
+
+var errTooManyRequests = fmt.Errorf("too many requests: send at most %d a second", requestRate)
+
 // errLagged is the cause of a write or ping that took longer than MaxLag.
 // When one times out the connection is closed, and the reader can see that
 // and cancel the stream's context first, so the timeout is told apart by its
@@ -32,9 +42,9 @@ var errLagged = errors.New("client took too long")
 //
 // or "unsubscribe" with the same fields, and gets back frames that are JSON
 // arrays of messages: a "subscription" message listing its subscriptions
-// after each request, an "error" message for a bad one, and "trade",
-// "quote" and "bar" messages. The handshake's Stream-Session header has the
-// hub's Session.
+// after each request, an "error" message for a bad one or one over the rate
+// limit, and "trade", "quote" and "bar" messages. The handshake's
+// Stream-Session header has the hub's Session.
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c, err := h.Connect()
 	if err != nil {
@@ -129,10 +139,15 @@ func (h *Hub) ping(ctx context.Context, conn *websocket.Conn, c *Client) {
 }
 
 func readRequests(ctx context.Context, conn *websocket.Conn, c *Client) {
+	var limit limiter
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
 			return
+		}
+		if !limit.allow(time.Now()) {
+			c.reply(errTooManyRequests)
+			continue
 		}
 		var req request
 		dec := json.NewDecoder(bytes.NewReader(data))
@@ -153,6 +168,26 @@ func readRequests(ctx context.Context, conn *websocket.Conn, c *Client) {
 			c.reply(err)
 		}
 	}
+}
+
+// limiter is a token bucket of requests.
+type limiter struct {
+	tokens float64
+	last   time.Time
+}
+
+func (l *limiter) allow(now time.Time) bool {
+	if l.last.IsZero() {
+		l.tokens = requestBurst
+	} else {
+		l.tokens = min(requestBurst, l.tokens+now.Sub(l.last).Seconds()*requestRate)
+	}
+	l.last = now
+	if l.tokens < 1 {
+		return false
+	}
+	l.tokens--
+	return true
 }
 
 // reply queues an error message for the client.
