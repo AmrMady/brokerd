@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -249,4 +250,14 @@ func TestBodyTooLarge(t *testing.T) {
 	alice, key := c.account()
 	body := `{"amount": "` + strings.Repeat("1", 2<<20) + `"}`
 	wantStatus(t, c.do("POST", "/v1/accounts/"+alice+"/deposits", body, "Authorization", key), http.StatusRequestEntityTooLarge, "too_large")
+}
+
+// A request whose client went away isn't an internal error.
+func TestCanceledRequests(t *testing.T) {
+	t.Parallel()
+	c := newClient(t)
+	c.server.Handle("GET /canceled", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c.server.WriteErrorForTest(w, r, context.Canceled)
+	}))
+	wantStatus(t, c.do("GET", "/canceled", ""), 499, "canceled")
 }

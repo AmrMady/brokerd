@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -35,6 +36,9 @@ func errorFor(err error) *apiError {
 	switch {
 	case errors.As(err, &e):
 		return e
+	case errors.Is(err, context.Canceled):
+		// The client went away; nginx's 499 says so in the metrics.
+		return newError(499, "canceled", "the request was canceled")
 	case errors.Is(err, ledger.ErrAccountNotFound), errors.Is(err, orders.ErrNotFound),
 		errors.Is(err, ledger.ErrTransferNotFound):
 		return newError(http.StatusNotFound, "not_found", "%s", err)
