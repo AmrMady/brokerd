@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"regexp"
 	"runtime/debug"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -48,6 +49,7 @@ type Server struct {
 	mux      *http.ServeMux
 	routes   []string // patterns, for checking against the OpenAPI spec
 	draining atomic.Bool
+	inflight sync.WaitGroup // requests being handled, WebSockets included
 }
 
 // maxBody is the largest request body the API reads.
@@ -102,6 +104,23 @@ func (s *Server) Drain() {
 	s.draining.Store(true)
 }
 
+// Wait waits, until ctx is done, for the requests still being handled. The
+// HTTP server's Shutdown doesn't wait for WebSocket connections, so call it
+// after closing them, once Shutdown has stopped new requests.
+func (s *Server) Wait(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		s.inflight.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 type handlerFunc func(w http.ResponseWriter, r *http.Request) error
 
 func (s *Server) route(pattern string, h handlerFunc) {
@@ -115,6 +134,8 @@ func (s *Server) route(pattern string, h handlerFunc) {
 
 // ServeHTTP gives each request an ID, recovers from panics, and logs it.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.inflight.Add(1)
+	defer s.inflight.Done()
 	id := r.Header.Get("X-Request-Id")
 	if !requestIDPattern.MatchString(id) {
 		id = newRequestID()

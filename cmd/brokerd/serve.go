@@ -226,7 +226,7 @@ func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.L
 	if engineErr, ok := <-engineDone; ok && !errors.Is(engineErr, context.Canceled) {
 		err = errors.Join(err, engineErr)
 	}
-	err = errors.Join(err, hub.Close(sctx))
+	err = errors.Join(err, hub.Close(sctx), apiSrv.Wait(sctx))
 
 	seq, s, m, h := sequencer.Stats(), seconds.Stats(), minutes.Stats(), hub.Stats()
 	logger.Info("stopped",
