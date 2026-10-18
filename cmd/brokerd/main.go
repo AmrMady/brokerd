@@ -2,6 +2,8 @@
 //
 // Usage:
 //
+//	brokerd serve [flags]       stream market data over WebSocket; see
+//	                            brokerd serve -h
 //	brokerd migrate             apply database migrations
 //	brokerd reconcile           check the ledger, exit 1 on any mismatch
 //	brokerd settle [YYYY-MM-DD] settle trades due on or before the date
@@ -12,14 +14,16 @@
 //	                            date: per dollar sold for the SEC fee, per
 //	                            share sold for TAF, with TAF's maximum per trade
 //
-// DATABASE_URL must be set.
+// The commands other than serve need DATABASE_URL.
 package main
 
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"strings"
@@ -35,7 +39,7 @@ import (
 	"github.com/AmrMady/brokerd/internal/postgres"
 )
 
-const usage = "usage: brokerd migrate | reconcile | settle [YYYY-MM-DD] | fee-rate sec|taf YYYY-MM-DD RATE [MAX]"
+const usage = "usage: brokerd serve [flags] | migrate | reconcile | settle [YYYY-MM-DD] | fee-rate sec|taf YYYY-MM-DD RATE [MAX]"
 
 const settleBatchSize = 500
 
@@ -66,6 +70,21 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
+	if args[0] == "serve" {
+		cfg, err := parseServe(args[1:], os.Stderr)
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		ln, err := net.Listen("tcp", cfg.addr)
+		if err != nil {
+			return err
+		}
+		return serve(ctx, cfg, ln, logger)
+	}
+
 	var command func(context.Context, *pgxpool.Pool, *slog.Logger) error
 	switch {
 	case args[0] == "migrate" && len(args) == 1:

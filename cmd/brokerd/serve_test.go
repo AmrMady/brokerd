@@ -1,0 +1,253 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"io"
+	"log/slog"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/coder/websocket"
+)
+
+type served struct {
+	url  string
+	logs *bytes.Buffer // read only after done
+	done chan error
+	stop context.CancelFunc
+}
+
+// startServe runs serve on a free port until stopped or the test ends.
+func startServe(t *testing.T, cfg serveConfig) *served {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &served{url: "ws://" + ln.Addr().String() + "/v1/stream", logs: &bytes.Buffer{}, done: make(chan error, 1), stop: cancel}
+	logger := slog.New(slog.NewJSONHandler(s.logs, nil))
+	go func() { s.done <- serve(ctx, cfg, ln, logger) }()
+	t.Cleanup(func() {
+		cancel()
+		<-s.done
+	})
+	return s
+}
+
+// wait returns serve's error once it has returned.
+func (s *served) wait(t *testing.T) error {
+	t.Helper()
+	select {
+	case err := <-s.done:
+		s.done <- err // for the cleanup
+		return err
+	case <-time.After(15 * time.Second):
+		t.Fatal("serve didn't return")
+		return nil
+	}
+}
+
+// stopped returns the attributes of the "market data stopped" log line.
+func (s *served) stopped(t *testing.T) map[string]any {
+	t.Helper()
+	for line := range strings.Lines(s.logs.String()) {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatal(err)
+		}
+		if m["msg"] == "market data stopped" {
+			return m
+		}
+	}
+	t.Fatalf("no stats logged:\n%s", s.logs)
+	return nil
+}
+
+func dial(t *testing.T, url string) *websocket.Conn {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	for {
+		conn, resp, err := websocket.Dial(ctx, url, nil)
+		if resp != nil && resp.Body != nil {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				t.Fatal(closeErr)
+			}
+		}
+		if err == nil {
+			return conn
+		}
+		if ctx.Err() != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// readUntil reads messages until each of the wanted types has been seen,
+// and returns them all.
+func readUntil(t *testing.T, conn *websocket.Conn, types ...string) []map[string]any {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	seen := map[string]bool{}
+	var all []map[string]any
+	for len(seen) < len(types) {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatalf("read: %v (saw %v)", err, seen)
+		}
+		var msgs []map[string]any
+		if err = json.Unmarshal(data, &msgs); err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range msgs {
+			for _, typ := range types {
+				if m["type"] == typ {
+					seen[typ] = true
+				}
+			}
+		}
+		all = append(all, msgs...)
+	}
+	return all
+}
+
+// drain reads until the connection closes and returns why.
+func drain(conn *websocket.Conn) <-chan error {
+	closed := make(chan error, 1)
+	go func() {
+		for {
+			if _, _, err := conn.Read(context.Background()); err != nil {
+				closed <- err
+				return
+			}
+		}
+	}()
+	return closed
+}
+
+func subscribe(t *testing.T, conn *websocket.Conn, request string) {
+	t.Helper()
+	if err := conn.Write(t.Context(), websocket.MessageText, []byte(request)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServeStreamsSimulatedMarketData(t *testing.T) {
+	t.Parallel()
+	s := startServe(t, serveConfig{feed: "sim", symbols: []string{"AAPL", "MSFT"}, rate: 2000, seed: 1})
+	conn := dial(t, s.url)
+	subscribe(t, conn, `{"action":"subscribe","trades":["AAPL"],"quotes":["AAPL"],"bars":["AAPL"]}`)
+
+	var lastSeq float64
+	for _, m := range readUntil(t, conn, "subscription", "trade", "quote", "bar") {
+		if m["type"] != "subscription" && m["symbol"] != "AAPL" {
+			t.Errorf("got %v, want only AAPL", m)
+		}
+		if m["type"] == "bar" && m["timeframe"] != "1s" {
+			t.Errorf("first bar %v, want a 1s bar", m)
+		}
+		if seq, ok := m["seq"].(float64); ok {
+			if seq <= lastSeq {
+				t.Errorf("seq %v after %v", seq, lastSeq)
+			}
+			lastSeq = seq
+		}
+	}
+
+	closed := drain(conn)
+	s.stop()
+	if err := s.wait(t); err != nil {
+		t.Errorf("serve returned %v", err)
+	}
+	if err := <-closed; websocket.CloseStatus(err) != websocket.StatusGoingAway {
+		t.Errorf("client saw %v, want going away", err)
+	}
+	if stats := s.stopped(t); stats["gaps"] != 0.0 || stats["stale"] != 0.0 {
+		t.Errorf("stats %v, want no gaps or stale events", stats)
+	}
+}
+
+// A replay that runs out ends serve, after its last bars are flushed.
+func TestServeEndsWithTheReplay(t *testing.T) {
+	t.Parallel()
+	s := startServe(t, serveConfig{feed: "replay", file: "../../internal/marketdata/testdata/events.csv", speed: 0})
+	if err := s.wait(t); err != nil {
+		t.Fatalf("serve returned %v", err)
+	}
+	// AAPL and MSFT trade in different seconds of the same minute.
+	if stats := s.stopped(t); stats["bars"] != 4.0 {
+		t.Errorf("stats %v, want 4 bars", stats)
+	}
+}
+
+func TestServeFailsWithTheFeed(t *testing.T) {
+	t.Parallel()
+	file := filepath.Join(t.TempDir(), "events.csv")
+	data := "type,symbol,seq,timestamp,price,size,bid,bid_size,ask,ask_size\ntrade,AAPL,1,yesterday,1,1,,,,\n"
+	if err := os.WriteFile(file, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := startServe(t, serveConfig{feed: "replay", file: file})
+	if err := s.wait(t); err == nil || !strings.Contains(err.Error(), "replay line 2") {
+		t.Errorf("serve returned %v, want the replay's error", err)
+	}
+}
+
+// One brokerd reads the simulator and another relays it.
+func TestServeRelaysAnotherServe(t *testing.T) {
+	t.Parallel()
+	core := startServe(t, serveConfig{feed: "sim", symbols: []string{"AAPL"}, rate: 2000, seed: 1})
+	dial(t, core.url) // wait until it's up
+	edge := startServe(t, serveConfig{feed: "relay", upstream: core.url, symbols: []string{"AAPL"}})
+	conn := dial(t, edge.url)
+	subscribe(t, conn, `{"action":"subscribe","trades":["AAPL"]}`)
+	readUntil(t, conn, "trade")
+
+	closed := drain(conn)
+	edge.stop()
+	if err := edge.wait(t); err != nil {
+		t.Errorf("edge returned %v", err)
+	}
+	<-closed
+	core.stop()
+	if err := core.wait(t); err != nil {
+		t.Errorf("core returned %v", err)
+	}
+}
+
+func TestParseServe(t *testing.T) {
+	t.Parallel()
+	cfg, err := parseServe(nil, io.Discard)
+	if err != nil || cfg.feed != "sim" || cfg.addr != ":8080" || len(cfg.symbols) != 5 || cfg.grace != time.Second {
+		t.Errorf("defaults: %+v, %v", cfg, err)
+	}
+	cfg, err = parseServe([]string{"-feed", "relay", "-upstream", "ws://core:8080/v1/stream", "-symbols", "AAPL,MSFT"}, io.Discard)
+	if err != nil || cfg.upstream != "ws://core:8080/v1/stream" || strings.Join(cfg.symbols, " ") != "AAPL MSFT" {
+		t.Errorf("relay: %+v, %v", cfg, err)
+	}
+	for _, args := range [][]string{
+		{"-feed", "kafka"},
+		{"-feed", "replay"},
+		{"-feed", "relay"},
+		{"-rate", "fast"},
+		{"extra"},
+	} {
+		if _, err = parseServe(args, io.Discard); err == nil {
+			t.Errorf("parseServe(%q) succeeded, want an error", args)
+		}
+	}
+	if _, err = parseServe([]string{"-h"}, io.Discard); !errors.Is(err, flag.ErrHelp) {
+		t.Errorf("-h returned %v, want %v", err, flag.ErrHelp)
+	}
+}

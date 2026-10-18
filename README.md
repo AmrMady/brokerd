@@ -1,8 +1,8 @@
 # brokerd
 
 A brokerage backend in Go, built as a paper-trading system: a double-entry
-ledger, market data, and an order engine. The ledger is done and market
-data is in progress.
+ledger, market data, and an order engine. The ledger and market data are
+done; the order engine is next.
 
 ## Status
 
@@ -17,11 +17,11 @@ Done:
 - Market data: a seeded random-walk simulator and CSV replay, per-symbol
   sequence checks, a lock-free latest-quote cache, 1s and 1m OHLCV bars by
   event time, a WebSocket stream that drops and then disconnects slow
-  clients, and a relay that streams from another brokerd.
+  clients, and a relay that streams from another brokerd, all run by
+  `brokerd serve`.
 
 Planned:
 
-- Market data: a command that runs it all
 - Paper trading: market and limit orders filled against live quotes
 - REST API, metrics, OpenAPI spec
 - Transactional outbox to Kafka
@@ -208,6 +208,29 @@ slow clients barely touch the publisher. Run it with
 `go test -run '^$' -bench HubFanOut ./internal/stream`.
 
 ## Running
+
+`brokerd serve` runs the market data pipeline and streams it at
+`ws://localhost:8080/v1/stream`:
+
+```text
+feed -> sequencer -> 1s and 1m bars -> hub -> WebSocket clients
+                  -> hub
+```
+
+```bash
+make serve      # simulated feed
+go run ./cmd/brokerd serve -feed replay -file events.csv -speed 10
+go run ./cmd/brokerd serve -feed relay -upstream ws://localhost:8080/v1/stream -addr :8081
+```
+
+Connect with any WebSocket client, for example
+`websocat ws://localhost:8080/v1/stream`, and send a subscribe request. A
+replay serves until its file runs out, flushing its last bars. On SIGINT or
+SIGTERM, serve stops the feed and the HTTP server, sends WebSocket clients
+a going-away close, waits for them, and logs sequence gaps, late trades and
+dropped messages.
+
+The ledger needs Postgres:
 
 ```bash
 make db-up      # Postgres in Docker

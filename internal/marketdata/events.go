@@ -44,3 +44,20 @@ type Feed interface {
 	// until ctx is done, and then returns ctx.Err().
 	Run(ctx context.Context, h Handler) error
 }
+
+// Handlers passes each event to every handler in it, in order.
+type Handlers []Handler
+
+// HandleTrade implements Handler.
+func (hs Handlers) HandleTrade(t Trade) {
+	for _, h := range hs {
+		h.HandleTrade(t)
+	}
+}
+
+// HandleQuote implements Handler.
+func (hs Handlers) HandleQuote(q Quote) {
+	for _, h := range hs {
+		h.HandleQuote(q)
+	}
+}
