@@ -3,6 +3,7 @@ package api_test
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/shopspring/decimal"
@@ -84,18 +85,22 @@ func TestOrders(t *testing.T) {
 	}
 }
 
-// Without a client_order_id, the Idempotency-Key is used as one, so a retry
-// returns the first order.
+// Without a client_order_id, one is made from the Idempotency-Key, so a
+// retry returns the first order. Keys can be longer than client order IDs,
+// so it's a hash of the key.
 func TestOrderIdempotencyKey(t *testing.T) {
 	t.Parallel()
 	c := newClient(t)
 	alice, key := c.funded("10000")
 	c.quote("100.00", "100.10")
 	body := `{"symbol":"AAPL","side":"buy","type":"market","time_in_force":"day","qty":"1"}`
-	first := c.do("POST", "/v1/accounts/"+alice+"/orders", body, "Authorization", key, "Idempotency-Key", "buy-1")
-	again := c.do("POST", "/v1/accounts/"+alice+"/orders", body, "Authorization", key, "Idempotency-Key", "buy-1")
-	if field(first, "id") != field(again, "id") || field(first, "client_order_id") != "buy-1" {
-		t.Errorf("first %v, retry %v; want the same order", first.body, again.body)
+	for _, idem := range []string{"buy-1", strings.Repeat("k", 200)} {
+		first := c.do("POST", "/v1/accounts/"+alice+"/orders", body, "Authorization", key, "Idempotency-Key", idem)
+		wantStatus(t, first, http.StatusCreated, "")
+		again := c.do("POST", "/v1/accounts/"+alice+"/orders", body, "Authorization", key, "Idempotency-Key", idem)
+		if field(first, "id") != field(again, "id") || field(first, "client_order_id") == "" {
+			t.Errorf("first %v, retry %v; want the same order", first.body, again.body)
+		}
 	}
 }
 

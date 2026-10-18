@@ -1,6 +1,8 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"net/http"
 	"strconv"
 	"time"
@@ -59,16 +61,18 @@ func orderOf(o orders.Order) orderJSON {
 }
 
 // placeOrder places an order. An order the account can't cover is still
-// created, as rejected, with the reason. Without a client_order_id, the
-// request's Idempotency-Key becomes one, so a retry can't place a second
-// order.
+// created, as rejected, with the reason. Without a client_order_id, one is
+// made from the request's Idempotency-Key, so a retry can't place a second
+// order. It's a hash of the key, since a key can be longer than a client
+// order ID.
 func (s *Server) placeOrder(w http.ResponseWriter, r *http.Request) error {
 	var body orderRequest
 	if err := decode(r, &body); err != nil {
 		return err
 	}
-	if body.ClientOrderID == "" {
-		body.ClientOrderID = r.Header.Get("Idempotency-Key")
+	if key := r.Header.Get("Idempotency-Key"); body.ClientOrderID == "" && key != "" {
+		sum := sha256.Sum256([]byte(key))
+		body.ClientOrderID = "idem-" + base64.RawURLEncoding.EncodeToString(sum[:])
 	}
 	o, err := s.cfg.Engine.Place(r.Context(), orders.Request{
 		AccountID:     r.PathValue("account"),

@@ -108,8 +108,9 @@ paths:
         A market order fills at once at the ask or the bid, and so does a limit
         order the quote already crosses; other limit orders rest until a quote
         crosses them. An order the account can't cover is created as rejected,
-        with the reason. Without a client_order_id, the Idempotency-Key is used
-        as one.
+        with the reason. Market orders are only taken while the market is open;
+        limit orders are taken at any time but only fill then. Without a
+        client_order_id, one is made from a hash of the Idempotency-Key.
       parameters:
         - $ref: "#/components/parameters/Account"
         - $ref: "#/components/parameters/IdempotencyKey"
