@@ -248,6 +248,15 @@ go run ./cmd/brokerd fee-rate sec YYYY-MM-DD RATE
 go run ./cmd/brokerd fee-rate taf YYYY-MM-DD RATE MAX
 ```
 
+Trades settle on the next trading day, and day orders expire at the close.
+Weekends are closed; add each exchange holiday, and each early close in New
+York time:
+
+```bash
+go run ./cmd/brokerd holiday 2026-11-26 "Thanksgiving Day"
+go run ./cmd/brokerd holiday 2026-11-27 "Day after Thanksgiving" 13:00
+```
+
 ## Tests
 
 ```bash

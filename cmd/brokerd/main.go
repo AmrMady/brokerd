@@ -13,6 +13,9 @@
 //	                            add a regulatory fee rate effective on the
 //	                            date: per dollar sold for the SEC fee, per
 //	                            share sold for TAF, with TAF's maximum per trade
+//	brokerd holiday YYYY-MM-DD NAME [HH:MM]
+//	                            add a market holiday, or an early close at
+//	                            HH:MM New York time
 //
 // The commands other than serve need DATABASE_URL.
 package main
@@ -35,11 +38,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
+	"github.com/AmrMady/brokerd/internal/calendar"
 	"github.com/AmrMady/brokerd/internal/ledger"
 	"github.com/AmrMady/brokerd/internal/postgres"
 )
 
-const usage = "usage: brokerd serve [flags] | migrate | reconcile | settle [YYYY-MM-DD] | fee-rate sec|taf YYYY-MM-DD RATE [MAX]"
+const usage = "usage: brokerd serve [flags] | migrate | reconcile | settle [YYYY-MM-DD] | " +
+	"fee-rate sec|taf YYYY-MM-DD RATE [MAX] | holiday YYYY-MM-DD NAME [HH:MM]"
 
 const settleBatchSize = 500
 
@@ -106,6 +111,14 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		}
 		command = func(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {
 			return addFeeRate(ctx, pool, logger, rate)
+		}
+	case args[0] == "holiday" && (len(args) == 3 || len(args) == 4):
+		h, err := parseHoliday(args[1:])
+		if err != nil {
+			return err
+		}
+		command = func(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {
+			return addHoliday(ctx, pool, logger, h)
 		}
 	default:
 		return fmt.Errorf("unknown command %q; %s", strings.Join(args, " "), usage)
@@ -218,5 +231,35 @@ func addFeeRate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, r 
 	}
 	logger.Info("fee rate added", "fee", r.Fee, "effective_on", r.EffectiveOn.Format(time.DateOnly),
 		"rate", r.Rate, "max_per_trade", r.MaxPerTrade)
+	return nil
+}
+
+func parseHoliday(args []string) (calendar.Holiday, error) {
+	h := calendar.Holiday{Name: args[1]}
+	var err error
+	if h.Day, err = time.Parse(time.DateOnly, args[0]); err != nil {
+		return h, fmt.Errorf("holiday date: %w", err)
+	}
+	if len(args) == 3 {
+		var closes time.Time
+		if closes, err = time.Parse("15:04", args[2]); err != nil {
+			return h, fmt.Errorf("early close: %w", err)
+		}
+		h.EarlyClose = time.Duration(closes.Hour())*time.Hour + time.Duration(closes.Minute())*time.Minute
+	}
+	return h, nil
+}
+
+func addHoliday(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, h calendar.Holiday) error {
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		return calendar.AddHoliday(ctx, tx, h)
+	}); err != nil {
+		return err
+	}
+	attrs := []any{"day", h.Day.Format(time.DateOnly), "name", h.Name}
+	if h.EarlyClose != 0 {
+		attrs = append(attrs, "early_close", time.Time{}.Add(h.EarlyClose).Format("15:04"))
+	}
+	logger.Info("holiday added", attrs...)
 	return nil
 }
