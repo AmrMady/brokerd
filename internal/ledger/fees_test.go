@@ -160,9 +160,10 @@ func TestAddFeeRate(t *testing.T) {
 	wantErr(t, l.addFeeRate(ledger.TAF, "2026-01-01", "0.0002", "8.30"), ledger.ErrInvalid)
 }
 
-// A trade that happened is always booked. A sale worth less than its fees,
-// by an account that can't pay the difference, takes what cash the account
-// has; the deficits account covers the rest, and the account is restricted.
+// A sale worth less than its fees, by an account that can't pay the
+// difference, fails like any other spend. With CoverShortfall, for a fill
+// that can't be refused anymore, it's booked: it takes what cash the account
+// has, the deficits account covers the rest, and the account is restricted.
 func TestSaleWorthLessThanItsFees(t *testing.T) {
 	t.Parallel()
 	l := newTestLedger(t)
@@ -170,10 +171,14 @@ func TestSaleWorthLessThanItsFees(t *testing.T) {
 	l.mustDeposit(t, "d1", alice, "1")
 	l.buy(t, "f1", alice, "1", "0.50")
 	h := l.mustHold(t, "h1", alice, "AAPL", "1")
-	_, err := l.settle(ledger.Fill{
+	sale := ledger.Fill{
 		ID: "f2", HoldID: h.ID, AccountID: alice, Symbol: "AAPL", Side: ledger.Sell,
 		Quantity: dec("1"), Price: dec("0.40"), Fee: dec("1"),
-	})
+	}
+	_, err := l.settle(sale)
+	wantErr(t, err, ledger.ErrInsufficientFunds)
+	sale.CoverShortfall = true
+	_, err = l.settle(sale)
 	noErr(t, err)
 
 	// The sale costs 0.60 more than it brings in, and the account has 0.50.

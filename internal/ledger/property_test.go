@@ -277,6 +277,7 @@ func (s *simulation) settle() {
 		}
 	} else {
 		f.Side, f.Symbol = ledger.Sell, h.Asset
+		f.CoverShortfall = s.rng.IntN(2) == 0
 		f.Fee = s.cents(0, 200)
 		if s.rng.IntN(4) == 0 {
 			f.Fee = s.cents(0, 10_000_000) // can be more than the sale and the cash
@@ -286,7 +287,7 @@ func (s *simulation) settle() {
 			f.Quantity = h.Remaining.Add(decimal.New(1, -9))
 		}
 	}
-	op := fmt.Sprintf("%s %s %s at %s, fee %s, against hold %d", f.Side, f.Quantity, f.Symbol, f.Price, f.Fee, h.ID)
+	op := fmt.Sprintf("%s %s %s at %s, fee %s, against hold %d, cover %t", f.Side, f.Quantity, f.Symbol, f.Price, f.Fee, h.ID, f.CoverShortfall)
 
 	notional := f.Notional()
 	cash := s.account(f.AccountID, ledger.USD)
@@ -301,6 +302,8 @@ func (s *simulation) settle() {
 		want = ledger.ErrInvalid
 	case need.GreaterThan(h.Remaining):
 		want = ledger.ErrHoldExceeded
+	case f.Side == ledger.Sell && !f.CoverShortfall && cash.available().Add(notional).Sub(f.Fee).IsNegative():
+		want = ledger.ErrInsufficientFunds
 	}
 
 	e, err := s.l.settle(f)

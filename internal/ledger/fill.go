@@ -33,6 +33,11 @@ type Fill struct {
 	Fee        decimal.Decimal // USD
 	TradeDate  time.Time
 	SettleDate time.Time
+	// CoverShortfall is for a fill the customer can't be refused anymore,
+	// like one of an order accepted earlier. A sale whose fees are more than
+	// it brings in is then booked even when the account can't pay the
+	// difference. Without it, such a fill fails with ErrInsufficientFunds.
+	CoverShortfall bool
 }
 
 // Notional returns quantity * price, rounded half-to-even to the cent.
@@ -159,10 +164,11 @@ func (f Fill) metadata() map[string]string {
 // settles them. Sells also pay the SEC fee and TAF at the rates in effect on
 // the trade date, and fail with ErrNoFeeRate if there is none.
 //
-// The trade has already happened, so it's booked even when the account
-// can't pay for it: a sale whose fees are more than it brings in takes what
-// cash the account has, the deficits account covers the rest, and the
-// account is restricted.
+// A sale whose fees are more than it brings in takes the difference from
+// the account's cash, and fails with ErrInsufficientFunds if there isn't
+// enough. With CoverShortfall it's booked anyway: it takes what cash the
+// account has, the deficits account covers the rest, and the account is
+// restricted.
 func SettleFill(ctx context.Context, tx pgx.Tx, f Fill) (Entry, error) {
 	if err := f.validate(); err != nil {
 		return Entry{}, err
@@ -176,7 +182,7 @@ func SettleFill(ctx context.Context, tx pgx.Tx, f Fill) (Entry, error) {
 	}
 	// Covering a shortfall reads what cash the account has, which needs the
 	// account to itself.
-	owes := f.Side == Sell && f.netProceeds(fees).IsNegative()
+	owes := f.CoverShortfall && f.Side == Sell && f.netProceeds(fees).IsNegative()
 	var account Account
 	if owes {
 		account, err = lockAccountForUpdate(ctx, tx, f.AccountID)

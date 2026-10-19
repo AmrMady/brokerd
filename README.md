@@ -191,10 +191,12 @@ Some notes on how it works:
   status, so a repeated event changes nothing and a cancel and a completion
   can't both win.
 - Some entries have to be booked even when the customer can't pay: a
-  returned deposit that was already spent, a sale whose fees are more than
-  it brings in, or the reversal of a sale whose proceeds were spent. The
-  customer pays what cash they have, a deficit entry from the `deficits`
-  account covers the rest, and the account is restricted. The deficit is
+  returned deposit that was already spent, the fill of a resting sell whose
+  fees turn out to be more than it brings in, or the reversal of a sale
+  whose proceeds were spent. The customer pays what cash they have, a
+  deficit entry from the `deficits` account covers the rest, and the
+  account is restricted. A sell that would fill as it's placed is rejected
+  instead, since the customer can still be told no. The deficit is
   its own entry, so a fill still matches its trade and a reversal still
   mirrors what it reverses. Covering a shortfall takes the account's row
   exclusively, so the cash it reads can't change before the entry posts.

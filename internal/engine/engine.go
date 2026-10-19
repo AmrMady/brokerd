@@ -258,7 +258,12 @@ func (e *Engine) tryAccept(ctx context.Context, tx pgx.Tx, o orders.Order) (orde
 		price = e.marketable(o)
 	}
 	if price.IsPositive() {
-		if o, err = e.fill(ctx, tx, o, price, now); err != nil {
+		// The customer is still placing the order, so a sale they can't pay
+		// the fees on is refused rather than covered.
+		if o, err = e.fill(ctx, tx, o, price, now, false); err != nil {
+			if errors.Is(err, ledger.ErrInsufficientFunds) && o.Side == ledger.Sell {
+				return orders.Order{}, rejection("not enough cash for the fees on this sale")
+			}
 			return orders.Order{}, rejectionFor(err, o)
 		}
 	}
@@ -316,21 +321,23 @@ func (e *Engine) holdAmount(o orders.Order, ask decimal.Decimal) decimal.Decimal
 // fill books an accepted order's fill at price, made at now while the
 // market is open, releases what's left of its hold, and marks it filled.
 // The fill's ID is the ledger's idempotency key, so the same order can't
-// fill twice.
-func (e *Engine) fill(ctx context.Context, tx pgx.Tx, o orders.Order, price decimal.Decimal, now time.Time) (orders.Order, error) {
+// fill twice. With cover, a sale the account can't pay the fees on is
+// booked anyway (see ledger.Fill.CoverShortfall).
+func (e *Engine) fill(ctx context.Context, tx pgx.Tx, o orders.Order, price decimal.Decimal, now time.Time, cover bool) (orders.Order, error) {
 	session := e.cfg.Calendar.Session(now)
 	began := time.Now()
 	entry, err := ledger.SettleFill(ctx, tx, ledger.Fill{
-		ID:         "fill:" + o.ID,
-		HoldID:     o.HoldID,
-		AccountID:  o.AccountID,
-		Symbol:     o.Symbol,
-		Side:       o.Side,
-		Quantity:   o.Quantity,
-		Price:      price,
-		Fee:        o.Commission,
-		TradeDate:  session,
-		SettleDate: e.cfg.Calendar.SettlementDate(session),
+		ID:             "fill:" + o.ID,
+		HoldID:         o.HoldID,
+		AccountID:      o.AccountID,
+		Symbol:         o.Symbol,
+		Side:           o.Side,
+		Quantity:       o.Quantity,
+		Price:          price,
+		Fee:            o.Commission,
+		TradeDate:      session,
+		SettleDate:     e.cfg.Calendar.SettlementDate(session),
+		CoverShortfall: cover,
 	})
 	if err != nil {
 		return o, err

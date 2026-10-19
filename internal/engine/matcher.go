@@ -138,7 +138,8 @@ func (e *Engine) fillResting(ctx context.Context, symbol ledger.Asset, id string
 		if err != nil {
 			return err
 		}
-		filled, err = e.fill(ctx, sp, o, price, now)
+		// The order was accepted earlier, so its fill can't be refused now.
+		filled, err = e.fill(ctx, sp, o, price, now, true)
 		var reason rejection
 		if errors.As(rejectionFor(err, o), &reason) {
 			if err = sp.Rollback(ctx); err != nil {
