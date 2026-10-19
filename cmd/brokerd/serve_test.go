@@ -25,10 +25,11 @@ import (
 )
 
 type served struct {
-	url  string
-	logs *bytes.Buffer // read only after done
-	done chan error
-	stop context.CancelFunc
+	url   string
+	logs  *bytes.Buffer // read only after done
+	done  chan error
+	stop  context.CancelFunc
+	hurry chan struct{} // close for a second signal
 }
 
 // startServe runs serve on a free port until stopped or the test ends.
@@ -39,9 +40,12 @@ func startServe(t *testing.T, cfg serveConfig) *served {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &served{url: "ws://" + ln.Addr().String() + "/v1/stream", logs: &bytes.Buffer{}, done: make(chan error, 1), stop: cancel}
+	s := &served{
+		url: "ws://" + ln.Addr().String() + "/v1/stream", logs: &bytes.Buffer{}, done: make(chan error, 1),
+		stop: cancel, hurry: make(chan struct{}),
+	}
 	logger := slog.New(slog.NewJSONHandler(s.logs, nil))
-	go func() { s.done <- serve(ctx, cfg, ln, logger) }()
+	go func() { s.done <- serve(ctx, s.hurry, cfg, ln, logger) }()
 	t.Cleanup(func() {
 		cancel()
 		<-s.done
@@ -187,7 +191,10 @@ func TestServeStreamsSimulatedMarketData(t *testing.T) {
 // A replay that runs out ends serve, after its last bars are flushed.
 func TestServeEndsWithTheReplay(t *testing.T) {
 	t.Parallel()
-	s := startServe(t, serveConfig{feed: "replay", file: "../../internal/marketdata/testdata/events.csv", speed: 0})
+	// A feed that ended on its own needs no drain delay.
+	s := startServe(t, serveConfig{
+		feed: "replay", file: "../../internal/marketdata/testdata/events.csv", speed: 0, drainDelay: time.Minute,
+	})
 	if err := s.wait(t); err != nil {
 		t.Fatalf("serve returned %v", err)
 	}
@@ -379,6 +386,41 @@ func TestServeDrainsBeforeStopping(t *testing.T) {
 	if took := time.Since(began); took < time.Second {
 		t.Errorf("stopped %s after the signal, before the drain delay was up", took)
 	}
+}
+
+// A second signal cuts the drain delay short.
+func TestServeHurriesOnASecondSignal(t *testing.T) {
+	t.Parallel()
+	s := startServe(t, serveConfig{feed: "sim", symbols: []string{"AAPL"}, rate: 10, seed: 1, drainDelay: time.Minute})
+	base := "http" + strings.TrimSuffix(strings.TrimPrefix(s.url, "ws"), "/v1/stream")
+	deadline := time.Now().Add(10 * time.Second)
+	for status := readyz(t, base); status != http.StatusOK; status = readyz(t, base) {
+		if time.Now().After(deadline) {
+			t.Fatalf("not ready: %d", status)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	s.stop()
+	for readyz(t, base) != http.StatusServiceUnavailable {
+		time.Sleep(10 * time.Millisecond)
+	}
+	began := time.Now()
+	close(s.hurry)
+	if err := s.wait(t); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(began); took > 5*time.Second {
+		t.Errorf("stopped %s after the second signal, want the drain delay cut short", took)
+	}
+}
+
+// readyz returns the status of /readyz, or 0 if the server didn't answer.
+func readyz(t *testing.T, base string) int {
+	status, err := tryGet(t, base+"/readyz")
+	if err != nil {
+		return 0
+	}
+	return status
 }
 
 // tryGet returns the status of a GET, or the error if there's no response.

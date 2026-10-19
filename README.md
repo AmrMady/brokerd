@@ -138,9 +138,10 @@ checks against the server's routes.
   its gap lowers it, which a counter can't do.
 - On SIGTERM, brokerd reports not ready and keeps serving for
   `-drain-delay` (5s), so a load balancer's readiness checks see the 503
-  and stop sending it requests. Then it stops taking requests and finishes
-  the ones in flight while quotes still flow, stops the feed and the
-  engine, closes the WebSocket clients, and closes the database pool last.
+  and stop sending it requests; a second signal cuts that short. Then it
+  stops taking requests and finishes the ones in flight while quotes still
+  flow, stops the feed and the engine, closes the WebSocket clients, and
+  closes the database pool last.
 
 ## Ledger
 

@@ -123,7 +123,8 @@ func (cfg serveConfig) newFeed(logger *slog.Logger) (marketdata.Feed, func() err
 }
 
 // serve runs the market data pipeline and serves it from ln until ctx is
-// done or the feed ends:
+// done or the feed ends, and shuts down when hurry is closed without
+// waiting out the drain delay:
 //
 //	feed -> sequencer -> quote cache -> engine
 //	                  -> 1s and 1m bars -> hub
@@ -131,7 +132,7 @@ func (cfg serveConfig) newFeed(logger *slog.Logger) (marketdata.Feed, func() err
 //
 // The engine and the API only run with a database; without one, serve only
 // streams market data, which is all a relay needs.
-func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.Logger) (err error) {
+func serve(ctx context.Context, hurry <-chan struct{}, cfg serveConfig, ln net.Listener, logger *slog.Logger) (err error) {
 	defer func() {
 		if closeErr := ln.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
 			err = errors.Join(err, closeErr)
@@ -246,13 +247,22 @@ func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.L
 	}
 
 	// Say we aren't ready, and keep serving for the drain delay so a load
-	// balancer's readiness checks see that and stop sending requests. Then
-	// stop taking requests and finish the ones in flight while quotes still
-	// flow, then stop the feed and the engine, then the WebSocket clients,
-	// which the HTTP server doesn't wait for. The pool closes last.
+	// balancer's readiness checks see that and stop sending requests; a
+	// second signal cuts it short, and a feed that ended on its own needs
+	// none. Then stop taking requests and finish the ones in flight while
+	// quotes still flow, then stop the feed and the engine, then the
+	// WebSocket clients, which the HTTP server doesn't wait for. The pool
+	// closes last.
 	apiSrv.Drain()
-	logger.Info("draining", "delay", cfg.drainDelay)
-	time.Sleep(cfg.drainDelay)
+	if !feedEnded {
+		logger.Info("draining", "delay", cfg.drainDelay)
+		drained := time.NewTimer(cfg.drainDelay)
+		select {
+		case <-drained.C:
+		case <-hurry:
+		}
+		drained.Stop()
+	}
 	sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	err = errors.Join(err, srv.Shutdown(sctx))

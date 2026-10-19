@@ -63,16 +63,28 @@ func loadConfig() (config, error) {
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	err := run(ctx, os.Args[1:], logger)
-	stop()
+	// The first SIGINT or SIGTERM cancels ctx, which starts a graceful
+	// shutdown, and a second closes hurry, which cuts it short. A third
+	// gets the default handling and kills the process.
+	ctx, cancel := context.WithCancel(context.Background())
+	hurry := make(chan struct{})
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-signals
+		cancel()
+		<-signals
+		close(hurry)
+		signal.Stop(signals)
+	}()
+	err := run(ctx, hurry, os.Args[1:], logger)
 	if err != nil {
 		logger.Error(err.Error())
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, args []string, logger *slog.Logger) error {
+func run(ctx context.Context, hurry <-chan struct{}, args []string, logger *slog.Logger) error {
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
@@ -89,7 +101,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		if err != nil {
 			return err
 		}
-		return serve(ctx, cfg, ln, logger)
+		return serve(ctx, hurry, cfg, ln, logger)
 	}
 
 	var command func(context.Context, *pgxpool.Pool, *slog.Logger) error
