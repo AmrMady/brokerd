@@ -35,7 +35,7 @@ A `CHECK` keeps customer rows from going below what's held.
 ## Consequences
 
 Writers queue on hot rows instead of failing. The clearing account is the
-limit: the load test tops out at about 300 fills a second, all waiting on
+limit: the load test tops out at about 450 fills a second, all waiting on
 its rows. Splitting it into several accounts, or batching fills into one
 entry, would raise that. `brokerd reconcile` rebuilds every balance from the
 journal, so a bug in the balance updates shows up as a mismatch.

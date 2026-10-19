@@ -451,13 +451,13 @@ the market to be open. Against
 
 | Traders | Requests/s | Market order p50 / p95 / p99 | Limit order p50 | Cancel p50 |
 |---------|------------|------------------------------|-----------------|------------|
-| 10      | 630        | 17.7 / 72.1 / 125 ms         | 4.2 ms          | 2.9 ms     |
-| 50      | 544        | 104 / 200 / 285 ms           | 84.6 ms         | 42.2 ms    |
+| 10      | 733        | 13.7 / 68.2 / 166 ms         | 2.8 ms          | 1.9 ms     |
+| 50      | 862        | 65.9 / 113 / 161 ms          | 54.2 ms         | 27.3 ms    |
 
 Every request succeeded. Market orders are slower, and get slower with more
 traders, because every fill updates the same two rows: the clearing
 account's USD and AAPL balances. Row locks are held until commit, so fills
-queue on those rows, and fills top out at about 300 per second. Orders that
+queue on those rows, and fills top out at about 450 per second. Orders that
 only place or release a hold, on the trader's own rows, stay fast. That's
 the first thing I'd change for production (see below).
 
