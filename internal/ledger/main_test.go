@@ -230,27 +230,14 @@ func wantErr(t *testing.T, err, want error) {
 	}
 }
 
-// peakConns samples how many of the pool's connections are in use, until
-// the returned function is called, which returns the most it saw.
-func peakConns(pool *pgxpool.Pool) func() int32 {
-	done, peak := make(chan struct{}), make(chan int32)
-	go func() {
-		var most int32
-		ticker := time.NewTicker(time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				peak <- most
-				return
-			case <-ticker.C:
-				most = max(most, pool.Stat().AcquiredConns())
-			}
-		}
-	}()
-	return func() int32 {
-		close(done)
-		return <-peak
+// wantConcurrent checks that more transactions ran at once than the eight
+// a default test pool allows. A pool only opens a connection when all of
+// its others are busy, so the connections it opened are the most that were
+// in use at once.
+func wantConcurrent(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	if n := pool.Stat().TotalConns(); n <= 8 {
+		t.Errorf("at most %d transactions ran at once, want more than a default pool's 8", n)
 	}
 }
 

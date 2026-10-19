@@ -54,7 +54,8 @@ func NewURL(tb testing.TB) string {
 
 // NewPoolSize is NewPool with up to conns connections, for tests of what
 // many transactions do at once, but no more than a quarter of what the
-// server allows, so other tests running meanwhile still get theirs.
+// server allows, so other tests running meanwhile still get theirs: 100 on
+// the test container and in CI, which allow 400.
 func NewPoolSize(tb testing.TB, conns int) *pgxpool.Pool {
 	tb.Helper()
 	pool, err := postgres.NewPool(context.Background(), newURL(tb, conns))
@@ -130,7 +131,7 @@ func start(ctx context.Context) (server, error) {
 			tcpostgres.WithUsername("brokerd"),
 			tcpostgres.WithPassword("brokerd"),
 			tcpostgres.BasicWaitStrategies(),
-			testcontainers.WithCmdArgs("-c", "fsync=off", "-c", "max_connections=500"),
+			testcontainers.WithCmdArgs("-c", "fsync=off", "-c", "max_connections=400"), // as in CI
 		)
 		if err != nil {
 			return s, fmt.Errorf("start postgres container: %w", err)

@@ -15,8 +15,10 @@ import (
 
 // 1,000 goroutines place holds on one account and then settle or release them.
 // The final balances and versions must match the successful operations exactly.
-// It has a pool big enough for the goroutines to contend in Postgres rather
-// than wait for a connection, and doesn't run in parallel with other tests.
+// It gets a big pool, 100 connections on the test servers, so that many of
+// its transactions contend in Postgres at once rather than eight; the other
+// goroutines wait for a connection. It doesn't run in parallel with other
+// tests.
 func TestConcurrentHoldsAndFills(t *testing.T) {
 	l := newTestLedgerOf(t, pgtest.NewPoolSize(t, 200))
 	owner := l.openAccount(t)
@@ -41,7 +43,6 @@ func TestConcurrentHoldsAndFills(t *testing.T) {
 		shareWrites += shareW
 	}
 
-	peak := peakConns(l.pool)
 	runConcurrently(1000, func(i int) {
 		holdKey, fillID := fmt.Sprintf("hold-%d", i), fmt.Sprintf("fill-%d", i)
 		price := decimal.New(int64(90+i%10), 0)
@@ -111,9 +112,7 @@ func TestConcurrentHoldsAndFills(t *testing.T) {
 		}
 	})
 
-	if n, most := peak(), l.pool.Config().MaxConns; n < most/2 {
-		t.Errorf("at most %d of %d connections in use at once, want the goroutines contending in Postgres, not for connections", n, most)
-	}
+	wantConcurrent(t, l.pool)
 	t.Logf("%d fills settled, %d holds rejected for insufficient funds", fills.Load(), rejected.Load())
 	if fills.Load() == 0 {
 		t.Fatal("no fill succeeded")
@@ -149,7 +148,6 @@ func TestManyCustomersTradeAtOnce(t *testing.T) {
 		l.mustDeposit(t, "d", ids[i], "10000")
 	}
 
-	peak := peakConns(l.pool)
 	runConcurrently(customers, func(i int) {
 		trade := func(key string, side ledger.Side, symbol ledger.Asset, price string) error {
 			asset, amount := ledger.USD, "101" // a share at 100, and the commission
@@ -180,9 +178,7 @@ func TestManyCustomersTradeAtOnce(t *testing.T) {
 			}
 		}
 	})
-	if n, most := peak(), min(customers, l.pool.Config().MaxConns); n < most/2 {
-		t.Errorf("at most %d transactions ran at once, want at least %d", n, most/2)
-	}
+	wantConcurrent(t, l.pool)
 
 	// Each round trip costs a customer the two commissions, less the dollar
 	// gained, plus a cent each of SEC fee and TAF on the sale.

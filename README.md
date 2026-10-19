@@ -569,7 +569,10 @@ make bench
 ```
 
 Set `BROKERD_TEST_DATABASE_URL` to run the tests against an existing
-Postgres instead of a container.
+Postgres instead of a container. Test pools get 8 connections, and the
+concurrency tests a quarter of the server's `max_connections`: 100 with the
+container and in CI, which allow 400. So the 1,000-goroutine ledger test
+has 100 transactions contending in Postgres at once, not 1,000.
 
 ## License
 
