@@ -195,6 +195,23 @@ func TestDayOrdersDontFillAfterTheirClose(t *testing.T) {
 	h.requireReconciled(t)
 }
 
+// Expiring an order that isn't due yet leaves it in the book.
+func TestExpiryLeavesOrdersNotDueInTheBook(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, engine.Config{})
+	alice := h.account(t, "1000")
+	day := limit(alice, ledger.Buy, "1", "99")
+	day.TimeInForce = orders.Day
+	o := h.place(t, day)
+	noErr(t, h.engine.ExpireForTest(h.ctx, o.ID, friday)) // before Friday's close
+
+	h.quote("AAPL", "97", "98")
+	h.engine.MatchForTest(h.ctx, "AAPL")
+	got, err := h.engine.Order(h.ctx, alice, o.ID)
+	noErr(t, err)
+	wantStatus(t, got, orders.Filled, "")
+}
+
 // An order that fails to expire doesn't keep the orders behind it from
 // expiring.
 func TestExpirySkipsOrdersThatFail(t *testing.T) {

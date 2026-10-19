@@ -209,20 +209,30 @@ func (e *Engine) expireDue(ctx context.Context) error {
 	}
 }
 
+// expire expires order id if it's due at now. It leaves the book once it's
+// closed, whatever closed it, but not while it's still open.
 func (e *Engine) expire(ctx context.Context, id string, now time.Time) error {
-	var symbol ledger.Asset
+	var (
+		symbol ledger.Asset
+		closed bool
+	)
 	err := pgx.BeginFunc(ctx, e.cfg.Pool, func(tx pgx.Tx) error {
 		o, err := orders.Lock(ctx, tx, id)
 		if err != nil {
 			return err
 		}
 		symbol = o.Symbol
-		if !o.Open() || !o.PastExpiry(now) {
+		if !o.Open() {
+			closed = true
 			return nil
 		}
+		if !o.PastExpiry(now) {
+			return nil
+		}
+		closed = true
 		return expireLocked(ctx, tx, o)
 	})
-	if err == nil {
+	if err == nil && closed {
 		e.unbook(symbol, id)
 	}
 	return err
