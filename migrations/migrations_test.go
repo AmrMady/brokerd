@@ -119,3 +119,37 @@ func TestCommissionBackfill(t *testing.T) {
 		}
 	}
 }
+
+// 00018 took every key that pointed only at an entry to be a fill's,
+// including deposit keys from before transfers. 00021 goes by the entry's
+// kind.
+func TestIdempotencyKeyReclassification(t *testing.T) {
+	t.Parallel()
+	pool := pgtest.NewPool(t)
+	alice := account(t, pool, "100")
+	var deposit int64
+	noErr(t, pool.QueryRow(t.Context(), `SELECT id FROM journal_entries WHERE kind = 'deposit'`).Scan(&deposit))
+	_, err := pool.Exec(t.Context(), `
+		INSERT INTO idempotency_keys (account_id, operation, idempotency_key, request_hash, entry_id)
+		VALUES ($1, 'fill', 'old-deposit', '\x00', $2), ($1, 'fill', 'seed', '\x00', $2)`, alice, deposit)
+	noErr(t, err)
+
+	rerun(t, pool, 21)
+	rows, err := pool.Query(t.Context(), `
+		SELECT idempotency_key || ' ' || operation FROM idempotency_keys WHERE account_id = $1 ORDER BY 1`, alice)
+	noErr(t, err)
+	got, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	noErr(t, err)
+	// "seed" is also the key of the transfer that made the deposit, so the
+	// fill key of the same name stays.
+	want := []string{"old-deposit transfer", "seed fill", "seed transfer"}
+	if len(got) != len(want) {
+		t.Fatalf("keys %q, want %q", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("keys %q, want %q", got, want)
+			break
+		}
+	}
+}
