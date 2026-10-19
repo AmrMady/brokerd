@@ -54,14 +54,28 @@ func TestHubSendsSubscribedEvents(t *testing.T) {
 // takes about as long with them as without. It compares the 90th
 // percentile, which a rare pause doesn't move but publishes waiting on the
 // spammers would, against a baseline taken first, so a slow machine or
-// -race moves both.
+// -race moves both. A long MaxLag, and a reader that keeps reading, keep
+// every client connected, and the test checks they were: one cut off
+// would make it pass for nothing.
 func TestSubscriptionSpamDoesNotDelayPublishing(t *testing.T) {
 	t.Parallel()
-	h := newHub(t, stream.Config{Buffer: 16, MaxSubscriptions: 5000})
+	h := newHub(t, stream.Config{Buffer: 16, MaxSubscriptions: 5000, MaxLag: time.Hour})
 	reader := connect(t, h)
 	if err := reader.Subscribe(stream.Subscriptions{Quotes: []string{"AAPL"}}); err != nil {
 		t.Fatal(err)
 	}
+	readCtx, stopReading := context.WithCancel(context.Background())
+	read := make(chan error, 1)
+	go func() {
+		var msgs [][]byte
+		for {
+			var err error
+			if msgs, err = reader.Next(readCtx, msgs[:0], 1000); err != nil {
+				read <- err
+				return
+			}
+		}
+	}()
 	var many stream.Subscriptions
 	for i := range 5000 {
 		many.Trades = append(many.Trades, fmt.Sprintf("S%d", i))
@@ -80,7 +94,7 @@ func TestSubscriptionSpamDoesNotDelayPublishing(t *testing.T) {
 	baseline := p90()
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
-	for range 4 {
+	for i := range 4 {
 		spammer := connect(t, h)
 		wg.Go(func() {
 			for {
@@ -89,7 +103,12 @@ func TestSubscriptionSpamDoesNotDelayPublishing(t *testing.T) {
 					return
 				default:
 				}
-				if spammer.Subscribe(many) != nil || spammer.Unsubscribe(many) != nil {
+				err := spammer.Subscribe(many)
+				if err == nil {
+					err = spammer.Unsubscribe(many)
+				}
+				if err != nil {
+					t.Errorf("spammer %d stopped: %v", i, err)
 					return
 				}
 			}
@@ -98,6 +117,13 @@ func TestSubscriptionSpamDoesNotDelayPublishing(t *testing.T) {
 	spammed := p90()
 	close(stop)
 	wg.Wait()
+	stopReading()
+	if err := <-read; !errors.Is(err, context.Canceled) {
+		t.Errorf("reader stopped with %v, want it still connected", err)
+	}
+	if n := h.Stats().Disconnected; n != 0 {
+		t.Errorf("%d clients disconnected for being slow, want none", n)
+	}
 	if spammed > 10*baseline+100*time.Microsecond {
 		t.Errorf("publishing took %s at the 90th percentile while clients changed subscriptions, and %s without", spammed, baseline)
 	}
