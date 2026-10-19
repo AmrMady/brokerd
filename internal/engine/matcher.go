@@ -239,9 +239,9 @@ func (e *Engine) expire(ctx context.Context, id string, now time.Time) error {
 }
 
 // expireLocked expires o, which the caller has locked, and releases its
-// hold.
+// holds.
 func expireLocked(ctx context.Context, tx pgx.Tx, o orders.Order) error {
-	if _, err := ledger.ReleaseHold(ctx, tx, o.HoldID); err != nil {
+	if err := releaseHolds(ctx, tx, o); err != nil {
 		return err
 	}
 	_, err := orders.Expire(ctx, tx, o.ID)

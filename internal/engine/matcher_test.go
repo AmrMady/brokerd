@@ -287,11 +287,11 @@ func TestUnbookableFillsCancelTheOrder(t *testing.T) {
 	h.requireReconciled(t)
 }
 
-// A sale worth less than its fees, from an account without the cash for
-// the difference, is rejected when it would fill as it's placed: the
-// customer can still be told no. A resting sale accepted earlier can't be
-// refused once it fills, so the deficits account covers it and the account
-// is restricted.
+// A sale worth less than its fees needs cash for the difference. A market
+// sell, which fills as it's placed, is rejected without it. A limit sell
+// holds the difference at its limit, the worst price it can fill at, so it's
+// rejected without it too; with it, the sell rests with that cash held and
+// its fill pays from it. Either way the deficits account pays nothing.
 func TestSalesTheAccountCantPayFeesOn(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, engine.Config{Commission: dec("1")})
@@ -299,25 +299,38 @@ func TestSalesTheAccountCantPayFeesOn(t *testing.T) {
 	h.quote("AAPL", "0.40", "0.41")
 	wantStatus(t, h.place(t, limit(alice, ledger.Buy, "1", "0.41")), orders.Filled, "") // all the cash
 	h.wantBalance(t, alice, ledger.USD, "0", "0")
-
 	wantStatus(t, h.place(t, market(alice, ledger.Sell, "1")), orders.Rejected, "not enough cash for the fees on this sale")
-	h.wantBalance(t, alice, "AAPL", "1", "0")
-	h.wantBalance(t, ledger.Deficits, ledger.USD, "0", "0")
 
 	h.quote("AAPL", "0.39", "0.40")
-	resting := h.place(t, limit(alice, ledger.Sell, "1", "0.40"))
-	wantStatus(t, resting, orders.Accepted, "")
+	sell := limit(alice, ledger.Sell, "1", "0.40") // $1 of commission on $0.40
+	wantStatus(t, h.place(t, sell), orders.Rejected, "not enough cash for the fees on this sale")
+	h.wantBalance(t, alice, "AAPL", "1", "0")
+
+	h.deposit(t, alice, "0.60")
+	canceled := h.place(t, sell)
+	wantStatus(t, canceled, orders.Accepted, "")
+	h.wantBalance(t, alice, ledger.USD, "0.6", "0.6")
+	_, err := h.engine.Cancel(h.ctx, alice, canceled.ID)
+	noErr(t, err)
+	h.wantBalance(t, alice, ledger.USD, "0.6", "0")
+	day := sell
+	day.TimeInForce = orders.Day
+	expired := h.place(t, day)
+	noErr(t, h.engine.ExpireForTest(h.ctx, expired.ID, time.Date(2026, 10, 16, 20, 0, 0, 0, time.UTC)))
+	h.wantBalance(t, alice, ledger.USD, "0.6", "0")
+
+	resting := h.place(t, sell)
 	h.quote("AAPL", "0.40", "0.41")
 	h.engine.MatchForTest(h.ctx, "AAPL")
 	got, err := h.engine.Order(h.ctx, alice, resting.ID)
 	noErr(t, err)
 	wantStatus(t, got, orders.Filled, "")
 	h.wantBalance(t, alice, ledger.USD, "0", "0")
-	h.wantBalance(t, ledger.Deficits, ledger.USD, "-0.6", "0")
+	h.wantBalance(t, ledger.Deficits, ledger.USD, "0", "0")
 	a, err := ledger.AccountByID(h.ctx, h.pool, alice)
 	noErr(t, err)
-	if a.Status != ledger.AccountRestricted {
-		t.Errorf("account is %s after a resting sale it couldn't pay for, want restricted", a.Status)
+	if a.Status != ledger.AccountActive {
+		t.Errorf("account is %s, want active", a.Status)
 	}
 	h.requireReconciled(t)
 }

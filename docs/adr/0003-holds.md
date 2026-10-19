@@ -12,17 +12,21 @@ at the same time as cancels and expiry.
 
 Accepting an order places a hold: shares for a sell, and for a buy enough
 cash at the limit price, or at the ask plus a 2% collar for a market order,
-plus the commission, rounded up to the cent. Available balance is balance
+plus the commission, rounded up to the cent. A limit sell whose commission
+and regulatory fees would be more than it brings in at its limit, the worst
+price it can get, also holds that difference in cash; otherwise a customer
+with no cash could leave the fees to the firm. Available balance is balance
 less held, and every spend checks it under the row lock. The order keeps
 the commission it was accepted with, so changing the commission can't leave
 its hold short.
 
 Each fill takes its cost out of the hold with a conditional update, so
 concurrent fills queue on the hold and can't use more than is left. What's
-left is released when the order fills, is canceled or expires. The hold is
-placed in a savepoint inside the order's transaction: if the account can't
-cover it, the savepoint is rolled back and the order is stored as rejected
-with the reason.
+left is released when the order fills, is canceled or expires. A sell's
+cash hold is released in its fill's transaction for the fill to spend. The
+holds are placed in a savepoint inside the order's transaction: if the
+account can't cover them, the savepoint is rolled back and the order is
+stored as rejected with the reason.
 
 ## Alternatives
 

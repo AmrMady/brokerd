@@ -102,6 +102,20 @@ func (h *harness) account(t *testing.T, cash string) string {
 	return id
 }
 
+// deposit adds cash to an account.
+func (h *harness) deposit(t *testing.T, account, cash string) {
+	t.Helper()
+	err := pgx.BeginFunc(h.ctx, h.pool, func(tx pgx.Tx) error {
+		tr, err := ledger.RequestDeposit(h.ctx, tx, ledger.CashTransfer{IdempotencyKey: "deposit-" + cash, AccountID: account, Amount: dec(cash)})
+		if err != nil {
+			return err
+		}
+		_, err = ledger.CompleteTransfer(h.ctx, tx, tr.ID)
+		return err
+	})
+	noErr(t, err)
+}
+
 func (h *harness) quote(symbol, bid, ask string) {
 	h.quotes.HandleQuote(marketdata.Quote{
 		Symbol: symbol, Bid: dec(bid), BidSize: dec("100"), Ask: dec(ask), AskSize: dec("100"), Timestamp: h.clock(),

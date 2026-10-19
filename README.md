@@ -196,14 +196,15 @@ Some notes on how it works:
   status, so a repeated event changes nothing and a cancel and a completion
   can't both win.
 - Some entries have to be booked even when the customer can't pay: a
-  returned deposit that was already spent, the fill of a resting sell whose
-  fees turn out to be more than it brings in, or the reversal of a sale
-  whose proceeds were spent. The customer pays what cash they have, a
-  deficit entry from the `deficits` account covers the rest, and the
-  account is restricted. A sell that would fill as it's placed is rejected
-  instead, since the customer can still be told no. The deficit is
-  its own entry, so a fill still matches its trade and a reversal still
-  mirrors what it reverses. Covering a shortfall takes the account's row
+  returned deposit that was already spent, the reversal of a sale whose
+  proceeds were spent, or the fill of a resting sell whose fees went up
+  after it was accepted. The customer pays what cash they have, a deficit
+  entry from the `deficits` account covers the rest, and the account is
+  restricted. A sale's fees are otherwise always paid by the customer: a
+  sell that fills as it's placed is rejected if they can't pay, and a limit
+  sell holds the cash it may need (see Trading). The deficit is its own
+  entry, so a fill still matches its trade and a reversal still mirrors
+  what it reverses. Covering a shortfall takes the account's row
   exclusively, so the cash it reads can't change before the entry posts.
 - Transfer requests, holds and fills take an idempotency key, scoped to
   the account and the operation, so a client's transfer key can't collide
@@ -252,7 +253,10 @@ was canceled, or be both.
 
 - Accepting an order places a hold: shares for a sell, and for a buy cash
   for the quantity at the limit price, or at the ask plus a 2% collar for a
-  market order, plus the commission, rounded up to the cent. Placing the
+  market order, plus the commission, rounded up to the cent. A limit sell
+  whose fees would be more than it brings in at its limit, the worst price
+  it can get, also holds that difference in cash, which its fill spends and
+  a cancel or expiry releases. Placing the
   hold, and filling a market order, happen in a savepoint inside the
   order's transaction; if the account can't cover the order, or there's no
   fresh quote, the savepoint is rolled back and the order is stored as

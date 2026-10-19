@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -100,7 +99,7 @@ func TestCommissionBackfill(t *testing.T) {
 			if err != nil {
 				return o, err
 			}
-			return orders.Accept(ctx, tx, o.ID, h.ID, time.Time{}, decimal.Zero) // as 00016 left it
+			return orders.Accept(ctx, tx, o.ID, orders.Acceptance{HoldID: h.ID}) // no commission, as 00016 left it
 		})
 	}
 	// 3 shares at 0.3335 cost 1.0005, held as 1.01, plus a 2.50 commission.

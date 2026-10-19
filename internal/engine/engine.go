@@ -247,11 +247,16 @@ func (e *Engine) tryAccept(ctx context.Context, tx pgx.Tx, o orders.Order) (orde
 	if err != nil {
 		return orders.Order{}, rejectionFor(err, o)
 	}
-	var expires time.Time
-	if o.TimeInForce == orders.Day {
-		expires = e.cfg.Calendar.Close(e.cfg.Calendar.Session(now))
+	accepted := orders.Acceptance{HoldID: hold.ID, Commission: e.cfg.Commission}
+	if o.Type == orders.Limit && o.Side == ledger.Sell {
+		if accepted.FeeHoldID, err = e.holdSaleFees(ctx, tx, o, now); err != nil {
+			return orders.Order{}, err
+		}
 	}
-	if o, err = orders.Accept(ctx, tx, o.ID, hold.ID, expires, e.cfg.Commission); err != nil {
+	if o.TimeInForce == orders.Day {
+		accepted.ExpiresAt = e.cfg.Calendar.Close(e.cfg.Calendar.Session(now))
+	}
+	if o, err = orders.Accept(ctx, tx, o.ID, accepted); err != nil {
 		return orders.Order{}, err
 	}
 	if o.Type == orders.Limit && open {
@@ -268,6 +273,36 @@ func (e *Engine) tryAccept(ctx context.Context, tx pgx.Tx, o orders.Order) (orde
 		}
 	}
 	return o, nil
+}
+
+// holdSaleFees holds the cash a limit sell needs when its fees would be more
+// than it brings in at its limit, and returns the hold, or 0 if it needs
+// none. The limit is the worst price it can fill at, and as the price rises
+// a sale's proceeds grow faster than its fees, so that's where the shortfall
+// is largest. Without the hold, the sell couldn't be refused once it filled.
+func (e *Engine) holdSaleFees(ctx context.Context, tx pgx.Tx, o orders.Order, now time.Time) (int64, error) {
+	price := o.LimitPrice.Decimal
+	fees, err := ledger.SaleFees(ctx, tx, o.Quantity, price, e.cfg.Calendar.Session(now))
+	if err != nil {
+		return 0, rejectionFor(err, o)
+	}
+	short := e.cfg.Commission.Add(fees).Sub(o.Quantity.Mul(price).RoundBank(2))
+	if !short.IsPositive() {
+		return 0, nil
+	}
+	hold, err := ledger.PlaceHold(ctx, tx, ledger.HoldRequest{
+		IdempotencyKey: "order-fees:" + o.ID,
+		AccountID:      o.AccountID,
+		Asset:          ledger.USD,
+		Amount:         short,
+	})
+	if errors.Is(err, ledger.ErrInsufficientFunds) {
+		return 0, rejection("not enough cash for the fees on this sale")
+	}
+	if err != nil {
+		return 0, rejectionFor(err, o)
+	}
+	return hold.ID, nil
 }
 
 // marketable returns the price a limit order would fill at right now, or
@@ -324,6 +359,14 @@ func (e *Engine) holdAmount(o orders.Order, ask decimal.Decimal) decimal.Decimal
 // fill twice. With cover, a sale the account can't pay the fees on is
 // booked anyway (see ledger.Fill.CoverShortfall).
 func (e *Engine) fill(ctx context.Context, tx pgx.Tx, o orders.Order, price decimal.Decimal, now time.Time, cover bool) (orders.Order, error) {
+	// A sell's fee hold is the cash its fees take beyond its proceeds. It's
+	// released for the fill to spend, in the same transaction, with the
+	// account's row locked, so nothing else can take it in between.
+	if o.FeeHoldID != 0 {
+		if _, err := ledger.ReleaseHold(ctx, tx, o.FeeHoldID); err != nil {
+			return o, err
+		}
+	}
 	session := e.cfg.Calendar.Session(now)
 	began := time.Now()
 	entry, err := ledger.SettleFill(ctx, tx, ledger.Fill{
@@ -428,12 +471,25 @@ func (e *Engine) Cancel(ctx context.Context, accountID, orderID string) (orders.
 }
 
 // cancelLocked cancels o, which the caller has locked, and releases its
-// hold. reason says why when the client didn't ask for it.
+// holds. reason says why when the client didn't ask for it.
 func cancelLocked(ctx context.Context, tx pgx.Tx, o orders.Order, reason string) (orders.Order, error) {
-	if _, err := ledger.ReleaseHold(ctx, tx, o.HoldID); err != nil {
+	if err := releaseHolds(ctx, tx, o); err != nil {
 		return orders.Order{}, err
 	}
 	return orders.Cancel(ctx, tx, o.ID, reason)
+}
+
+// releaseHolds releases what an open order holds.
+func releaseHolds(ctx context.Context, tx pgx.Tx, o orders.Order) error {
+	for _, id := range []int64{o.HoldID, o.FeeHoldID} {
+		if id == 0 {
+			continue
+		}
+		if _, err := ledger.ReleaseHold(ctx, tx, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Order returns one of an account's orders.

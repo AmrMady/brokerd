@@ -100,6 +100,13 @@ func (r regulatoryFees) total() decimal.Decimal {
 	return r.sec.Add(r.taf)
 }
 
+// SaleFees returns the SEC fee and TAF that selling quantity at price on
+// tradeDate pays, at the rates in effect then, or ErrNoFeeRate.
+func SaleFees(ctx context.Context, q Querier, quantity, price decimal.Decimal, tradeDate time.Time) (decimal.Decimal, error) {
+	r, err := feesFor(ctx, q, Fill{Side: Sell, Quantity: quantity, Price: price, TradeDate: tradeDate})
+	return r.total(), err
+}
+
 // feesFor returns the regulatory fees on f at the rates in effect on its
 // trade date. Only sells pay them. Each is rounded up to the cent, and TAF
 // is capped per trade.

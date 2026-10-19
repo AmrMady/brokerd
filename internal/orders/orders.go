@@ -155,6 +155,7 @@ type Order struct {
 	RejectReason  string
 	CancelReason  string // when the engine canceled it, not the client
 	HoldID        int64
+	FeeHoldID     int64           // a sell's cash for fees beyond its proceeds; 0 if none
 	ExpiresAt     time.Time       // day orders: the close of their session
 	Commission    decimal.Decimal // USD, fixed when it's accepted
 	FillPrice     decimal.NullDecimal
@@ -176,7 +177,7 @@ func (o Order) PastExpiry(now time.Time) bool {
 
 const columns = `id::text, account_id::text, COALESCE(client_order_id, ''), symbol, side, type, time_in_force,
 	quantity, limit_price, status, COALESCE(reject_reason, ''), COALESCE(cancel_reason, ''), COALESCE(hold_id, 0),
-	expires_at, commission, fill_price, COALESCE(fill_entry_id, 0), created_at, updated_at, closed_at`
+	COALESCE(fee_hold_id, 0), expires_at, commission, fill_price, COALESCE(fill_entry_id, 0), created_at, updated_at, closed_at`
 
 func scan(row pgx.Row) (Order, error) {
 	var (
@@ -185,7 +186,7 @@ func scan(row pgx.Row) (Order, error) {
 	)
 	err := row.Scan(&o.ID, &o.AccountID, &o.ClientOrderID, &o.Symbol, &o.Side, &o.Type, &o.TimeInForce,
 		&o.Quantity, &o.LimitPrice, &o.Status, &o.RejectReason, &o.CancelReason, &o.HoldID,
-		&expires, &o.Commission, &o.FillPrice, &o.FillEntryID, &o.CreatedAt, &o.UpdatedAt, &closed)
+		&o.FeeHoldID, &expires, &o.Commission, &o.FillPrice, &o.FillEntryID, &o.CreatedAt, &o.UpdatedAt, &closed)
 	if expires != nil {
 		o.ExpiresAt = *expires
 	}
@@ -234,15 +235,26 @@ func Create(ctx context.Context, tx pgx.Tx, r Request) (o Order, created bool, e
 	return o, false, nil
 }
 
-// Accept moves a new order to accepted once its hold is placed. Day orders
-// expire at expiresAt. Its fill is charged commission, which the hold
-// covers.
-func Accept(ctx context.Context, tx pgx.Tx, id string, holdID int64, expiresAt time.Time, commission decimal.Decimal) (Order, error) {
+// Acceptance is what an order is accepted with.
+type Acceptance struct {
+	HoldID     int64           // the cash for a buy, or the shares for a sell
+	FeeHoldID  int64           // a sell's cash for fees beyond its proceeds, if any
+	ExpiresAt  time.Time       // day orders: the close of their session
+	Commission decimal.Decimal // USD, charged on its fill
+}
+
+// Accept moves a new order to accepted once its holds are placed.
+func Accept(ctx context.Context, tx pgx.Tx, id string, a Acceptance) (Order, error) {
 	var expires *time.Time
-	if !expiresAt.IsZero() {
-		expires = &expiresAt
+	if !a.ExpiresAt.IsZero() {
+		expires = &a.ExpiresAt
 	}
-	return transition(ctx, tx, id, New, Accepted, `hold_id = $4, expires_at = $5, commission = $6`, holdID, expires, commission)
+	var feeHold *int64
+	if a.FeeHoldID != 0 {
+		feeHold = &a.FeeHoldID
+	}
+	return transition(ctx, tx, id, New, Accepted, `hold_id = $4, fee_hold_id = $5, expires_at = $6, commission = $7`,
+		a.HoldID, feeHold, expires, a.Commission)
 }
 
 // Reject moves a new order to rejected.
