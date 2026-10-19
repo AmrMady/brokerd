@@ -72,7 +72,10 @@ func newClient(t *testing.T) *client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := api.New(api.Config{Pool: pool, Engine: eng, Quotes: quotes})
+	s, err := api.New(api.Config{Pool: pool, Engine: eng, Quotes: quotes})
+	if err != nil {
+		t.Fatal(err)
+	}
 	srv := httptest.NewServer(s)
 	t.Cleanup(srv.Close)
 	return &client{t: t, url: srv.URL, server: s, pool: pool, quotes: quotes}

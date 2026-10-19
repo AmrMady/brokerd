@@ -74,7 +74,8 @@ func parseServe(args []string, output io.Writer) (serveConfig, error) {
 		return nil
 	})
 	fs.DurationVar(&cfg.readTimeout, "read-timeout", 30*time.Second, "how long a request can take to arrive")
-	fs.DurationVar(&cfg.writeTimeout, "write-timeout", 30*time.Second, "how long a request can take to answer")
+	fs.DurationVar(&cfg.writeTimeout, "write-timeout", 30*time.Second,
+		"how long a request can take to answer; one with an Idempotency-Key gets 5s less, so over 5s with a database")
 	fs.DurationVar(&cfg.idleTimeout, "idle-timeout", 2*time.Minute, "how long a keep-alive connection can sit idle")
 	fs.DurationVar(&cfg.drainDelay, "drain-delay", 5*time.Second,
 		"on shutdown, how long to keep serving while /readyz says 503, so load balancers stop sending requests")
@@ -184,7 +185,11 @@ func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.L
 		handlers = append(handlers, eng) // after the cache, so it reads the newest quote
 		apiCfg.Pool, apiCfg.Engine = pool, eng
 	}
-	apiSrv := api.New(apiCfg)
+	apiCfg.WriteTimeout = cfg.writeTimeout
+	apiSrv, err := api.New(apiCfg)
+	if err != nil {
+		return err
+	}
 	apiSrv.Handle("GET /v1/stream", hub)
 	apiSrv.Handle("GET /metrics", reg.Handler())
 	sequencer := marketdata.NewSequencer(append(handlers, seconds, minutes, hub))

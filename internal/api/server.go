@@ -35,6 +35,9 @@ type Config struct {
 	// and duration; ObservePost how long each transfer took to post.
 	ObserveRequest func(route string, status int, d time.Duration)
 	ObservePost    func(time.Duration)
+	// WriteTimeout is the HTTP server's write timeout, if it has one. See
+	// handlerTimeout.
+	WriteTimeout time.Duration
 }
 
 // Bars gives the most recent bars of a symbol.
@@ -51,15 +54,16 @@ type Server struct {
 	draining atomic.Bool
 	inflight sync.WaitGroup // requests being handled, WebSockets included
 
-	// handlerTimeout is how long a request with an Idempotency-Key can run.
-	handlerTimeout time.Duration
+	handlerTimeout time.Duration // see the function of that name
 }
 
 // maxBody is the largest request body the API reads.
 const maxBody = 1 << 20
 
-// New returns a Server with the API's routes.
-func New(cfg Config) *Server {
+// New returns a Server with the API's routes. With a pool, which requests
+// with an Idempotency-Key need, it fails if the write timeout leaves them
+// no time to be answered.
+func New(cfg Config) (*Server, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)
 	}
@@ -69,7 +73,13 @@ func New(cfg Config) *Server {
 	if cfg.ObservePost == nil {
 		cfg.ObservePost = func(time.Duration) {}
 	}
-	s := &Server{cfg: cfg, mux: http.NewServeMux(), handlerTimeout: claimLease / 2}
+	s := &Server{cfg: cfg, mux: http.NewServeMux()}
+	if cfg.Pool != nil {
+		var err error
+		if s.handlerTimeout, err = handlerTimeout(cfg.WriteTimeout); err != nil {
+			return nil, err
+		}
+	}
 	s.route("GET /healthz", func(w http.ResponseWriter, r *http.Request) error { s.healthz(w, r); return nil })
 	s.route("GET /readyz", func(w http.ResponseWriter, r *http.Request) error { s.readyz(w, r); return nil })
 	// Anything else gets the usual JSON error rather than the mux's text.
@@ -79,7 +89,7 @@ func New(cfg Config) *Server {
 		s.route("GET /v1/bars/{symbol}", s.bars)
 	}
 	if cfg.Pool == nil || cfg.Engine == nil {
-		return s
+		return s, nil
 	}
 	// Every request that changes an account can be retried safely with an
 	// Idempotency-Key, scoped to that account.
@@ -93,7 +103,7 @@ func New(cfg Config) *Server {
 	s.route("DELETE /v1/accounts/{account}/orders/{order}", s.authorized(s.idempotent(s.cancelOrder)))
 	s.route("GET /v1/accounts/{account}/positions", s.authorized(s.positions))
 	s.route("GET /v1/accounts/{account}/activities", s.authorized(s.activities))
-	return s
+	return s, nil
 }
 
 // Handle mounts h on the server.

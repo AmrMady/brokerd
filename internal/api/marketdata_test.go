@@ -16,7 +16,11 @@ import (
 func TestMarketData(t *testing.T) {
 	t.Parallel()
 	quotes, bars := &marketdata.QuoteCache{}, marketdata.NewBarStore(10)
-	srv := httptest.NewServer(api.New(api.Config{Quotes: quotes, Bars: bars}))
+	s, err := api.New(api.Config{Quotes: quotes, Bars: bars})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(s)
 	t.Cleanup(srv.Close)
 	c := &client{t: t, url: srv.URL}
 

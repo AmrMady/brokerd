@@ -21,8 +21,8 @@ const (
 	keyRetention = 24 * time.Hour
 	// claimLease is how long a request can run before its key is taken
 	// to be abandoned, by a process that crashed, and can be claimed again.
-	// Handlers get half of it (Server.handlerTimeout), so one that's only
-	// slow stops, and gives its key back, before the lease is up.
+	// Handlers get at most half of it (see handlerTimeout), so one that's
+	// only slow stops, and gives its key back, before the lease is up.
 	claimLease = time.Minute
 )
 
@@ -156,6 +156,25 @@ func (s *Server) claim(ctx context.Context, scope, key string, fp []byte) (time.
 		}
 	})
 	return claimedAt, stored, err
+}
+
+// writeMargin is how long before the server's write timeout a request with
+// an Idempotency-Key times out, which leaves time to write its 503.
+const writeMargin = 5 * time.Second
+
+// handlerTimeout is how long a request with an Idempotency-Key can run: at
+// most half its key's lease, so a slow one stops before another request
+// could take the key over, and writeMargin less than the server's write
+// timeout, so its timeout is answered before the connection is cut.
+func handlerTimeout(writeTimeout time.Duration) (time.Duration, error) {
+	d := claimLease / 2
+	if writeTimeout > 0 {
+		d = min(d, writeTimeout-writeMargin)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("a write timeout of %s leaves requests no time: it must be over %s", writeTimeout, writeMargin)
+	}
+	return d, nil
 }
 
 var errInProgress = newError(http.StatusConflict, "request_in_progress",

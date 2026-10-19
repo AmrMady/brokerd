@@ -34,7 +34,10 @@ func TestOpenAPIMatchesRoutes(t *testing.T) {
 	}
 
 	// Nothing is called while the routes are set up, so empty values do.
-	s := New(Config{Pool: &pgxpool.Pool{}, Engine: &engine.Engine{}, Quotes: &marketdata.QuoteCache{}, Bars: marketdata.NewBarStore(1)})
+	s, err := New(Config{Pool: &pgxpool.Pool{}, Engine: &engine.Engine{}, Quotes: &marketdata.QuoteCache{}, Bars: marketdata.NewBarStore(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
 	served := []string{"GET /v1/stream", "GET /metrics"} // mounted by serve
 	for _, r := range s.routes {
 		if r != "/" {

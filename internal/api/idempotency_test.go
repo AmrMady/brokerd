@@ -58,7 +58,10 @@ func idempotentServer(t *testing.T, h *testHandler, deadline ...time.Duration) (
 	if err := MaintainIdempotency(t.Context(), pool, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	s := New(Config{Pool: pool})
+	s, err := New(Config{Pool: pool})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(deadline) > 0 {
 		s.handlerTimeout = deadline[0]
 	}
@@ -210,6 +213,74 @@ func TestIdempotentHandlersHaveADeadline(t *testing.T) {
 	h.slow.Store(false)
 	if status, body, _ := post(t, url+"/things/a", "k1", `{}`); status != http.StatusCreated || body != `{"call":2}` {
 		t.Errorf("retry after the deadline: %d %s, want it run again", status, body)
+	}
+}
+
+// A request with an Idempotency-Key times out a few seconds before the
+// server's write timeout, so the client gets the 503 rather than a dropped
+// connection.
+func TestIdempotentTimeoutsAreAnswered(t *testing.T) {
+	t.Parallel()
+	pool := pgtest.NewPool(t)
+	if err := MaintainIdempotency(t.Context(), pool, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	const writeTimeout = 6 * time.Second
+	s, err := New(Config{Pool: pool, WriteTimeout: writeTimeout})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &testHandler{}
+	h.slow.Store(true)
+	s.route("POST /things/{account}", s.idempotent(h.serve))
+	srv := httptest.NewUnstartedServer(s)
+	srv.Config.WriteTimeout = writeTimeout
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", srv.URL+"/things/a", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Idempotency-Key", "k1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("slow handler: %v, want a 503", err)
+	}
+	if err = resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("slow handler: %d, want 503", resp.StatusCode)
+	}
+}
+
+func TestHandlerTimeout(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		write, want time.Duration
+	}{
+		{0, 30 * time.Second}, // no write timeout: half the lease
+		{30 * time.Second, 25 * time.Second},
+		{2 * time.Minute, 30 * time.Second},
+		{6 * time.Second, time.Second},
+		{5 * time.Second, 0}, // leaves no time
+	} {
+		got, err := handlerTimeout(tt.write)
+		if tt.want == 0 {
+			if err == nil {
+				t.Errorf("handlerTimeout(%s) = %s, want an error", tt.write, got)
+			}
+			continue
+		}
+		if err != nil || got != tt.want {
+			t.Errorf("handlerTimeout(%s) = %s, %v, want %s", tt.write, got, err, tt.want)
+		}
+		if (tt.write > 0 && got >= tt.write) || got >= claimLease {
+			t.Errorf("handlerTimeout(%s) = %s, want it under the write timeout and the lease", tt.write, got)
+		}
 	}
 }
 
