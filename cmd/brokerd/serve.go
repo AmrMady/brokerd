@@ -232,7 +232,7 @@ func serve(ctx context.Context, hurry <-chan struct{}, cfg serveConfig, ln net.L
 	}()
 	logger.Info("serving", "addr", ln.Addr().String(), "feed", cfg.feed, "symbols", cfg.symbols, "api", eng != nil)
 
-	feedEnded := false
+	feedEnded, replayDone := false, false
 	select {
 	case err = <-fed:
 		feedEnded = true
@@ -241,6 +241,7 @@ func serve(ctx context.Context, hurry <-chan struct{}, cfg serveConfig, ln net.L
 			seconds.Flush()
 			minutes.Flush()
 			logger.Info("feed ended")
+			replayDone = cfg.feed == "replay"
 		}
 	case err = <-served:
 	case <-ctx.Done():
@@ -248,13 +249,13 @@ func serve(ctx context.Context, hurry <-chan struct{}, cfg serveConfig, ln net.L
 
 	// Say we aren't ready, and keep serving for the drain delay so a load
 	// balancer's readiness checks see that and stop sending requests; a
-	// second signal cuts it short, and a feed that ended on its own needs
-	// none. Then stop taking requests and finish the ones in flight while
-	// quotes still flow, then stop the feed and the engine, then the
-	// WebSocket clients, which the HTTP server doesn't wait for. The pool
-	// closes last.
+	// second signal cuts it short, and a replay that ran out needs none. A
+	// feed that failed still gets it. Then stop taking requests and finish
+	// the ones in flight while quotes still flow, then stop the feed and the
+	// engine, then the WebSocket clients, which the HTTP server doesn't wait
+	// for. The pool closes last.
 	apiSrv.Drain()
-	if !feedEnded {
+	if !replayDone {
 		logger.Info("draining", "delay", cfg.drainDelay)
 		drained := time.NewTimer(cfg.drainDelay)
 		select {

@@ -211,9 +211,14 @@ func TestServeFailsWithTheFeed(t *testing.T) {
 	if err := os.WriteFile(file, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s := startServe(t, serveConfig{feed: "replay", file: file})
+	// A feed that failed, unlike one that ran out, still gets its drain.
+	began := time.Now()
+	s := startServe(t, serveConfig{feed: "replay", file: file, drainDelay: 500 * time.Millisecond})
 	if err := s.wait(t); err == nil || !strings.Contains(err.Error(), "replay line 2") {
 		t.Errorf("serve returned %v, want the replay's error", err)
+	}
+	if took := time.Since(began); took < 500*time.Millisecond {
+		t.Errorf("stopped after %s, before the drain delay was up", took)
 	}
 }
 

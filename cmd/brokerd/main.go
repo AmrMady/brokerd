@@ -64,8 +64,8 @@ func loadConfig() (config, error) {
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	// The first SIGINT or SIGTERM cancels ctx, which starts a graceful
-	// shutdown, and a second closes hurry, which cuts it short. A third
-	// gets the default handling and kills the process.
+	// shutdown, and a second closes hurry, which cuts its drain delay short.
+	// A third gets the default handling and kills the process.
 	ctx, cancel := context.WithCancel(context.Background())
 	hurry := make(chan struct{})
 	signals := make(chan os.Signal, 1)
