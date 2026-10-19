@@ -220,10 +220,14 @@ func serve(ctx context.Context, cfg serveConfig, ln net.Listener, logger *slog.L
 	defer stopFeed()
 	fed := make(chan error, 1)
 	go func() { fed <- feed.Run(feedCtx, sequencer) }()
+	// A replay's event time comes from its events alone: its clock runs at
+	// its own speed, and it flushes its bars when it ends.
 	ticked := make(chan struct{})
 	go func() {
 		defer close(ticked)
-		tickBars(feedCtx, seconds, minutes)
+		if cfg.feed != "replay" {
+			tickBars(feedCtx, seconds, minutes)
+		}
 	}()
 	logger.Info("serving", "addr", ln.Addr().String(), "feed", cfg.feed, "symbols", cfg.symbols, "api", eng != nil)
 

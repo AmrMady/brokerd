@@ -266,6 +266,29 @@ func TestParseServe(t *testing.T) {
 	}
 }
 
+// A replay's event time comes from its events alone. Replayed slower than
+// real time, a quiet stretch would otherwise move event time on faster
+// than the replay, and its next trade would be dropped as late.
+func TestSlowReplaysKeepTheirTrades(t *testing.T) {
+	t.Parallel()
+	file := filepath.Join(t.TempDir(), "events.csv")
+	err := os.WriteFile(file, []byte(`type,symbol,seq,timestamp,price,size,bid,bid_size,ask,ask_size
+trade,AAPL,1,2026-10-16T13:30:00Z,100,1,,,,
+trade,AAPL,2,2026-10-16T13:30:01.5Z,101,1,,,,
+`), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := startServe(t, serveConfig{feed: "replay", file: file, speed: 0.3}) // 5s apart
+	if err = s.wait(t); err != nil {
+		t.Fatal(err)
+	}
+	// Two 1s bars and one 1m bar.
+	if stats := s.stopped(t); stats["late_1s"] != 0.0 || stats["bars"] != 3.0 {
+		t.Errorf("stats %v, want no late trades and 3 bars", stats)
+	}
+}
+
 // Stopping flushes the bars still open, rather than losing them.
 func TestServeFlushesBarsWhenStopped(t *testing.T) {
 	t.Parallel()
