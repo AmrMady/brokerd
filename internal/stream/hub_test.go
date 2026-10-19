@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -49,7 +50,11 @@ func TestHubSendsSubscribedEvents(t *testing.T) {
 	}
 }
 
-// Clients spamming subscription changes don't hold up the feed.
+// Clients spamming subscription changes don't hold up the feed: publishing
+// takes about as long with them as without. It compares the 90th
+// percentile, which a rare pause doesn't move but publishes waiting on the
+// spammers would, against a baseline taken first, so a slow machine or
+// -race moves both.
 func TestSubscriptionSpamDoesNotDelayPublishing(t *testing.T) {
 	t.Parallel()
 	h := newHub(t, stream.Config{Buffer: 16, MaxSubscriptions: 5000})
@@ -61,7 +66,18 @@ func TestSubscriptionSpamDoesNotDelayPublishing(t *testing.T) {
 	for i := range 5000 {
 		many.Trades = append(many.Trades, fmt.Sprintf("S%d", i))
 	}
+	p90 := func() time.Duration {
+		took := make([]time.Duration, 2000)
+		for i := range took {
+			began := time.Now()
+			h.HandleQuote(marketdata.Quote{Symbol: "AAPL", Seq: uint64(i + 1)})
+			took[i] = time.Since(began)
+		}
+		slices.Sort(took)
+		return took[len(took)*9/10]
+	}
 
+	baseline := p90()
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	for range 4 {
@@ -79,19 +95,11 @@ func TestSubscriptionSpamDoesNotDelayPublishing(t *testing.T) {
 			}
 		})
 	}
-	const n = 2000
-	var total, worst time.Duration
-	for i := range n {
-		began := time.Now()
-		h.HandleQuote(marketdata.Quote{Symbol: "AAPL", Seq: uint64(i + 1)})
-		took := time.Since(began)
-		total += took
-		worst = max(worst, took)
-	}
+	spammed := p90()
 	close(stop)
 	wg.Wait()
-	if avg := total / n; avg > time.Millisecond || worst > 50*time.Millisecond {
-		t.Errorf("publishing took %s on average and %s at worst while clients changed subscriptions", avg, worst)
+	if spammed > 10*baseline+100*time.Microsecond {
+		t.Errorf("publishing took %s at the 90th percentile while clients changed subscriptions, and %s without", spammed, baseline)
 	}
 }
 
