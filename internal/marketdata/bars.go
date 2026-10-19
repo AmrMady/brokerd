@@ -24,8 +24,10 @@ type Bar struct {
 	Trades   int
 }
 
-// BarHandler receives bars as their windows close. Like a Handler, it runs
-// on the feed's goroutine and must not block.
+// BarHandler receives bars as their windows close. It's called with the
+// aggregator's lock held, on the feed's goroutine or on the one calling
+// Tick or Flush, so it must not block, and must be safe to call from more
+// than one goroutine.
 type BarHandler interface {
 	HandleBar(Bar)
 }

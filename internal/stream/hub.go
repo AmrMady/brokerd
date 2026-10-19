@@ -81,9 +81,11 @@ type topic struct {
 }
 
 // Hub sends market data events to the clients subscribed to them. It's a
-// marketdata.Handler and BarHandler, called on the feed's goroutine, and it
-// never blocks it: each client has its own bounded queue, and a client that
-// can't keep up loses its oldest messages and is then disconnected.
+// marketdata.Handler, called on the feed's goroutine, and a BarHandler,
+// called there too and on the goroutine that ticks the aggregators while
+// the feed is quiet. It never blocks either: each client has its own
+// bounded queue, and a client that can't keep up loses its oldest messages
+// and is then disconnected.
 //
 // Each event is encoded once, however many clients get it. Publishing takes
 // no lock: each topic's subscribers are an immutable slice, which a
@@ -426,7 +428,8 @@ func (c *Client) Close() {
 	})
 }
 
-// push queues msg. It never blocks: it's called on the feed's goroutine.
+// push queues msg. It never blocks: publishing calls it on the feed's
+// goroutine, and for bars on the aggregators' tick goroutine too.
 func (c *Client) push(msg []byte) {
 	c.mu.Lock()
 	if c.err != nil {

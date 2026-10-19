@@ -359,8 +359,9 @@ subscription's confirmation is always queued before its first event. The
 handshake's `Stream-Session` header names the hub's session: events keep
 their feed's sequence numbers, which start over when the hub restarts.
 
-The hub runs on the feed's goroutine and must never block it, so a slow
-client can only hurt itself:
+The hub is called on the feed's goroutine, and for bars also on the one
+that ticks the aggregators while the feed is quiet. It must never block
+either, so a slow client can only hurt itself:
 
 - Each event is encoded once, then queued for every client subscribed to
   it. Each client's queue is a fixed-size ring buffer; when it's full, the

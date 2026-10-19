@@ -4,8 +4,10 @@ Status: accepted
 
 ## Context
 
-The hub runs on the feed's goroutine. One slow WebSocket client must not
-slow the feed, the engine behind it, or the other clients.
+The hub is called on the feed's goroutine, and for bars also on the one
+that ticks the bar aggregators while the feed is quiet. One slow WebSocket
+client must not slow the feed, the engine behind it, the bars, or the
+other clients.
 
 ## Decision
 
