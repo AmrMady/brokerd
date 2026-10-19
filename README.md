@@ -132,7 +132,10 @@ checks against the server's routes.
   checks the database and says 503 once shutdown starts. `/metrics` has
   Prometheus metrics: events per second, sequence gaps, hub drops and
   disconnects, place-to-fill and ledger post latency, orders that failed
-  to expire, and request latency by route.
+  to expire, and request latency by route. Sequence numbers still missing
+  are the gauge `brokerd_marketdata_missed_events`, which replaced the
+  counter `brokerd_marketdata_missed_events_total`: a late event that fills
+  its gap lowers it, which a counter can't do.
 - On SIGTERM, brokerd reports not ready and keeps serving for
   `-drain-delay` (5s), so a load balancer's readiness checks see the 503
   and stop sending it requests. Then it stops taking requests and finishes
