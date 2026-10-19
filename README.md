@@ -425,8 +425,9 @@ window where one is committed and the other isn't.
   leader reads a batch, publishes it, waits for Kafka to acknowledge every
   event, then marks it published. A relay that dies in between publishes the
   batch again when it comes back: delivery is at least once. A relay that
-  loses its connection reconnects with backoff (1s doubling to 30s, reset
-  after a connection that led).
+  loses its connection reconnects with backoff (1s doubling to 30s), which
+  starts over only after a connection that published a batch or led for a
+  minute, so a leader that fails as soon as it leads keeps backing off.
 - The producer is idempotent, so its own retries can't duplicate or reorder
   events, and an account's events share a partition, so they stay in order.
   A failing broker is retried with backoff while the relay keeps the lead.

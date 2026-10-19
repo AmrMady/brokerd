@@ -225,9 +225,9 @@ func TestOneRelayLeads(t *testing.T) {
 	stopB()
 }
 
-// A relay that led and then lost its connection reconnects after the first
-// backoff again, rather than one that kept doubling over its lifetime.
-func TestRelayBackoffStartsOverAfterLeading(t *testing.T) {
+// A relay whose sessions fail as soon as it leads keeps backing off; only
+// one that got as far as publishing a batch starts its backoff over.
+func TestRelayBackoffStartsOverAfterPublishing(t *testing.T) {
 	t.Parallel()
 	db := newOutboxDB(t)
 	var logs lockedBuffer
@@ -247,17 +247,27 @@ func TestRelayBackoffStartsOverAfterLeading(t *testing.T) {
 	}()
 
 	var pid int32
-	for range 3 {
+	cut := func(before func()) {
 		previous := pid
 		eventually(t, "the relay to lead", func() bool {
 			pid = db.leaderPID(t)
 			return pid != 0 && pid != previous
 		})
+		before()
 		if _, err = db.pool.Exec(t.Context(), `SELECT pg_terminate_backend($1)`, pid); err != nil {
 			t.Fatal(err)
 		}
 	}
+	for range 3 {
+		cut(func() {}) // as soon as it leads
+	}
+	cut(func() {
+		db.add(t, 1)
+		eventually(t, "the event to be published", func() bool { return len(db.ids(t, "published_at IS NULL")) == 0 })
+	})
 	eventually(t, "the relay to lead again", func() bool { return db.leaderPID(t) != pid && db.leaderPID(t) != 0 })
+
+	var waits []time.Duration
 	for line := range strings.Lines(logs.String()) {
 		var m struct {
 			Msg     string `json:"msg"`
@@ -266,9 +276,13 @@ func TestRelayBackoffStartsOverAfterLeading(t *testing.T) {
 		if err = json.Unmarshal([]byte(line), &m); err != nil {
 			t.Fatal(err)
 		}
-		if m.Msg == "outbox relay lost its database connection" && time.Duration(m.RetryIn) != 10*time.Millisecond {
-			t.Errorf("retry in %s after leading, want the first backoff", time.Duration(m.RetryIn))
+		if m.Msg == "outbox relay lost its database connection" {
+			waits = append(waits, time.Duration(m.RetryIn))
 		}
+	}
+	ms := time.Millisecond
+	if want := []time.Duration{10 * ms, 20 * ms, 40 * ms, 10 * ms}; !slices.Equal(waits, want) {
+		t.Errorf("waits %v, want %v", waits, want)
 	}
 }
 

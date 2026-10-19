@@ -44,6 +44,10 @@ type RelayConfig struct {
 // belong to their database, so relays of other databases don't share it.
 const leaderLock = 0x6f7574626f78 // "outbox"
 
+// steadyLead is how long a relay has to lead, with nothing to publish, for
+// its session to count as healthy when the connection then fails.
+const steadyLead = time.Minute
+
 // Relay publishes the outbox. Only one relay publishes at a time: the one
 // holding the leader lock, on its own connection. The others wait to take
 // over when it stops or its connection drops, since Postgres releases the
@@ -93,15 +97,17 @@ func (r *Relay) Published() uint64 {
 }
 
 // Run publishes the outbox until ctx is done. It reconnects with backoff,
-// which starts over after a session that got as far as leading.
+// which starts over after a healthy session: one that published a batch,
+// or led for steadyLead. A leader that fails as soon as it leads keeps
+// backing off.
 func (r *Relay) Run(ctx context.Context) error {
 	wait := r.cfg.Backoff
 	for {
-		led, err := r.lead(ctx)
+		healthy, err := r.lead(ctx)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if led {
+		if healthy {
 			wait = r.cfg.Backoff
 		}
 		r.cfg.Logger.Warn("outbox relay lost its database connection", "error", err, "retry_in", wait)
@@ -113,8 +119,9 @@ func (r *Relay) Run(ctx context.Context) error {
 }
 
 // lead connects, waits to become the leader, and publishes until ctx is
-// done or the connection fails. led reports whether it became the leader.
-func (r *Relay) lead(ctx context.Context) (led bool, err error) {
+// done or the connection fails. healthy reports whether, as the leader, it
+// published a batch or led for steadyLead.
+func (r *Relay) lead(ctx context.Context) (healthy bool, err error) {
 	// The pool's parser takes out settings only a pool understands, like
 	// pool_max_conns, which Postgres itself would refuse.
 	cfg, err := pgxpool.ParseConfig(r.cfg.DatabaseURL)
@@ -127,7 +134,7 @@ func (r *Relay) lead(ctx context.Context) (led bool, err error) {
 	}
 	defer func() { err = errors.Join(err, conn.Close(context.WithoutCancel(ctx))) }()
 
-	for !led {
+	for led := false; !led; {
 		if err = conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, leaderLock).Scan(&led); err != nil {
 			return false, err
 		}
@@ -138,22 +145,30 @@ func (r *Relay) lead(ctx context.Context) (led bool, err error) {
 		}
 	}
 	r.cfg.Logger.Info("outbox relay is leading")
+	leading := time.Now()
+	published, err := r.publish(ctx, conn)
+	return published || time.Since(leading) >= steadyLead, err
+}
 
+// publish publishes batches, as the leader, until ctx is done or the
+// connection fails, and reports whether it published any.
+func (r *Relay) publish(ctx context.Context, conn *pgx.Conn) (published bool, err error) {
 	var purged time.Time
 	for {
 		if time.Since(purged) > time.Hour {
 			if err = r.purge(ctx, conn); err != nil {
-				return true, err
+				return published, err
 			}
 			purged = time.Now()
 		}
 		var n int
 		if n, err = r.publishBatch(ctx, conn); err != nil {
-			return true, err
+			return published, err
 		}
+		published = published || n > 0
 		if n < r.cfg.BatchSize {
 			if err = sleep(ctx, r.cfg.Interval); err != nil {
-				return true, err
+				return published, err
 			}
 		}
 	}
