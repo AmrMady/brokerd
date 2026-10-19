@@ -470,7 +470,14 @@ traders, because every fill updates the same two rows: the clearing
 account's USD and AAPL balances. Row locks are held until commit, so fills
 queue on those rows, and fills top out at about 450 per second. Orders that
 only place or release a hold, on the trader's own rows, stay fast. That's
-the first thing I'd change for production (see below).
+the first thing I'd change for production (see below). It's also why 50
+traders get more done than 10: fills are capped either way, and the extra
+traders' limit orders and cancels run alongside them.
+
+The first run of this test, before a round of review fixes, got 630 and
+544 requests/s. Run back to back on the same machine, the code from before
+and after those fixes gets about the same (743 and 822, then 710 and 770),
+so the better numbers came from the machine, not the code.
 
 ```bash
 go run ./cmd/loadtest -url http://localhost:8080 -workers 50 -duration 30s
